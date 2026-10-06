@@ -1,0 +1,22 @@
+node_modules/
+.scaffold/
+build/
+*.xpi
+.env
+.npmrc
+*.log
+
+# Scratch directories the analysis and layout tooling writes into. They hold
+# generated PDFs and page renders, including copies of whatever paper was used
+# for a test run, so they must not be published.
+tools/_variants/
+tools/_bisect/
+tools/_out/
+output/
+
+# Regenerated from node_modules by tools/sync-pdfjs.mjs, which the build and
+# start scripts run beforehand.
+addon/content/scripts/pdf.worker.min.mjs
+
+# TypeScript incremental build state.
+*.tsbuildinfo
