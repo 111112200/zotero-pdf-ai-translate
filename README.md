@@ -55,14 +55,21 @@ Zotero 条目
 
 ## 安装
 
+### 直接下载（推荐）
+
+到 [Releases](https://github.com/111112200/zotero-pdf-ai-translate/releases/latest) 下载 `pdf-ai-translate.xpi`，然后：
+
+Zotero → **工具 → 插件** → 右上角齿轮 → **Install Plugin from File…** → 选该 `.xpi` → 重启 Zotero。
+
+不需要 Python、不需要 Node、不需要任何服务。整个插件就是这一个文件。
+
+### 从源码构建
+
 ```powershell
-# 构建 XPI
 npm install
 npm run build:xpi
 # 产物：.scaffold/build/pdf-ai-translate.xpi
 ```
-
-Zotero → 工具 → 插件 → 齿轮 → **Install Plugin from File** → 选择该 `.xpi`。
 
 ## 配置
 
