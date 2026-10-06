@@ -91,7 +91,7 @@ globals.ztoolkit = { log: (...args: unknown[]) => logs.push(args.map(String).joi
 globals.rootURI = `file:///${path.join(PLUGIN_ROOT, "addon").replace(/\\/g, "/")}/`;
 globals.addonRef = "pdfaitranslate";
 globals.addonName = "PDF AI Translate";
-globals.addonID = "pdf-ai-translate@dsh.local";
+globals.addonID = "pdf-ai-translate@111112200.github.io";
 globals.addonInstance = "PDFAITranslate";
 globals.buildVersion = "harness";
 globals.prefsPrefix = prefPrefix;
