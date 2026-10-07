@@ -14,7 +14,7 @@ export interface Operators {
     argsArray: unknown[][];
 }
 /** Read painted bounds, including nested Form XObjects and their transforms. */
-export function graphicRegions(list: Operators, ops: Record<string, number>, geometry: PageGeometry): Box[] {
+export function graphicRegions(list: Operators, ops: Record<string, number>, geometry: PageGeometry, runs: TextRun[] = []): Box[] {
     let matrix: Matrix = [1, 0, 0, 1, 0, 0];
     const stack: Matrix[] = [];
     const forms: Array<{
@@ -82,6 +82,13 @@ export function graphicRegions(list: Operators, ops: Record<string, number>, geo
     // Connected vector marks enclose chart labels. Thin horizontal rules also
     // enclose table rows, even when the PDF has no vertical cell borders.
     const rules = paths.filter(b => b.right - b.left > 40 && b.bottom - b.top < 2);
+    for (const caption of runs.filter(run => /^Algorithm(?:\s+\d+\b|\s*$)/i.test(run.text))) {
+        const top = rules.filter(rule => Math.abs(rule.top - caption.y) < caption.fontSize * 1.5 && rule.left <= caption.x + 3 && rule.right >= caption.x + caption.width - 3)
+            .sort((a, b) => Math.abs(a.top - caption.y) - Math.abs(b.top - caption.y))[0];
+        if (!top) continue;
+        const aligned = rules.filter(rule => Math.abs(rule.left - top.left) < 3 && Math.abs(rule.right - top.right) < 3 && rule.top >= top.top && rule.top - top.top < geometry.height * 0.45);
+        if (aligned.length >= 3) regions.push(union(aligned));
+    }
     for (const rule of rules) {
         const aligned = rules.filter(b => Math.abs(b.left - rule.left) < 8 && Math.abs(b.right - rule.right) < 8 && Math.abs(b.top - rule.top) < 100);
         if (aligned.length >= 3)

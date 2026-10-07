@@ -93,7 +93,7 @@ globals.addonRef = "pdfaitranslate";
 globals.addonName = "PDF AI Translate";
 globals.addonID = "pdf-ai-translate@111112200.github.io";
 globals.addonInstance = "PDFAITranslate";
-globals.buildVersion = "harness";
+globals.buildVersion = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8")).version;
 globals.prefsPrefix = prefPrefix;
 globals.__env__ = "development";
 
@@ -218,7 +218,7 @@ const result = await renderBilingual({
 });
 console.log(
   `rendered in ${Date.now() - renderStart} ms -> ${result.bytes.length} bytes, ` +
-    `overflowBoxes=${result.overflowBoxes}, missingGlyphs=${result.missingGlyphs.length}`,
+    `overflowBoxes=${result.overflowBoxes}, missingGlyphs=${result.missingGlyphs.length}, preservedMathParagraphs=${result.preservedMathParagraphs}`,
 );
 
 fs.mkdirSync(path.dirname(OUTPUT), { recursive: true });
@@ -229,6 +229,7 @@ if (result.missingGlyphs.length) {
 }
 
 if (process.argv.includes("--dump")) {
+  fs.writeFileSync(OUTPUT + ".decisions.json", JSON.stringify(result.debug, null, 2));
   const skipped = result.debug.filter((d) => !d.formulaBlock && !d.translated);
   const formulas = result.debug.filter((d) => d.formulaBlock);
   const wide = result.debug.filter(
@@ -243,7 +244,7 @@ if (process.argv.includes("--dump")) {
     console.log(
       `  SKIPPED p${entry.page} #${entry.index} ` +
         `box=(${b.left.toFixed(0)},${b.top.toFixed(0)})-` +
-        `(${b.right.toFixed(0)},${b.bottom.toFixed(0)})`,
+        `(${b.right.toFixed(0)},${b.bottom.toFixed(0)}) reason=${entry.reason}`,
     );
   }
   if (process.argv.includes("--all")) {

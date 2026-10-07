@@ -16,7 +16,7 @@
  * still in the left column.
  */
 
-import { degrees, PDFDocument, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { degrees, PDFDocument, rgb, pushGraphicsState, popGraphicsState, setLineWidth, setTextRenderingMode, TextRenderingMode, setStrokingColor, type PDFFont, type PDFPage } from "pdf-lib";
 import { getPref } from "../../utils/prefs";
 import { uprightPlacement } from "../extract/geometry";
 import type { Box, PageContent } from "../extract/types";
@@ -65,6 +65,8 @@ export interface ParagraphDecision {
   fontPt: number;
   lines: number;
   truncated: number;
+  /** Why a translatable paragraph was retained, when applicable. */
+  reason?: "untranslated" | "unchanged" | "unsupported-math" | "overflow" | "protected";
 }
 
 const COLORS = {
@@ -246,7 +248,7 @@ function overlayTranslations(args: OverlayArgs): { overflows: number; preservedM
     }
     const translated = translations.get(`${page.index}:${index}`);
     if (translated === undefined) {
-      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: 0, lines: 0, truncated: 0 });
+      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: 0, lines: 0, truncated: 0, reason: "untranslated" });
       return;
     }
     const text = translated.replace(/\s+/g, " ").trim();
@@ -254,32 +256,45 @@ function overlayTranslations(args: OverlayArgs): { overflows: number; preservedM
       record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: 0, lines: 0, truncated: 0 });
       return;
     }
+    if (text.replace(/\s/g, "") === paragraph.source.replace(/\s/g, "")) {
+      record({ formulaBlock: false, translated: false, lineBoxes: 0, fontPt: 0, lines: 0, truncated: 0, reason: "unchanged" });
+      return;
+    }
 
     if (paragraph.math.some(span => span.token && !span.outlines)) {
       preservedMath++;
-      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: 0, lines: 0, truncated: 0 });
+      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: 0, lines: 0, truncated: 0, reason: "unsupported-math" });
       return;
     }
 
-    const fit = fitParagraph(text, paragraph, font);
-    const blocked = (page.protectedRegions ?? []).some(box => touches(paragraph.box, box, 2.5));
+    const placement = { ...paragraph.box };
+    let blocked = false;
+    for (const region of page.protectedRegions ?? []) {
+      if (!touches(placement, region)) continue;
+      if (region.top >= placement.bottom - paragraph.fontSize && region.bottom >= placement.bottom) placement.bottom = region.top - 0.5;
+      else if (region.bottom <= placement.top + paragraph.fontSize && region.top <= placement.top) placement.top = region.bottom + 0.5;
+      else blocked = true;
+    }
+    const fit = fitParagraph(text, { ...paragraph, box: placement }, font);
     if (!fit.fits || blocked) {
       overflows += fit.fits ? 0 : 1;
-      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: fit.size, lines: 0, truncated: 0 });
+      record({ formulaBlock: false, translated: false, lineBoxes: paragraph.lineBoxes.length, fontPt: fit.size, lines: 0, truncated: 0, reason: fit.fits ? "protected" : "overflow" });
       return;
     }
-    for (const box of paragraph.lineBoxes) drawCover(out, box, translatedX, toPdfY);
+    for (const box of paragraph.lineBoxes) drawCover(out, box, translatedX, toPdfY, page.protectedRegions ?? []);
     const { size, lines, leading } = fit;
     // The first baseline follows the fitted glyph height; the remaining lines
     // distribute over the source paragraph's vertical extent.
-    let y = paragraph.box.top + size * 0.9;
+    let y = placement.top + fit.baselineOffset;
+    if (paragraph.bold) out.pushOperators(pushGraphicsState(), setLineWidth(size * 0.018), setStrokingColor(COLORS.ink), setTextRenderingMode(TextRenderingMode.FillAndOutline));
     for (const line of lines) {
       let x = translatedX + paragraph.box.left;
+      if (paragraph.alignment === "center") x += (paragraph.box.right - paragraph.box.left - line.reduce((sum, piece) => sum + piece.width, 0)) / 2;
       for (const piece of line) {
         if (piece.math?.box) {
           const scale = size / paragraph.fontSize;
           for (const glyph of piece.math.outlines ?? []) {
-            if (glyph.path) out.drawSvgPath(glyph.path, {x: x + glyph.x * scale, y: toPdfY(y), scale, color: COLORS.ink});
+            if (glyph.path) out.drawSvgPath(glyph.path, {x: x + glyph.x * scale, y: toPdfY(y + (glyph.y ?? 0) * scale), scale, color: COLORS.ink});
           }
         } else if (piece.text) {
           drawTextLine(out, piece.text, font, size, x, toPdfY(y));
@@ -289,6 +304,7 @@ function overlayTranslations(args: OverlayArgs): { overflows: number; preservedM
       }
       y += leading;
     }
+    if (paragraph.bold) out.pushOperators(popGraphicsState());
     record({ formulaBlock: false, translated: true, lineBoxes: paragraph.lineBoxes.length, fontPt: size, lines: lines.length, truncated: 0 });
   });
 
@@ -301,16 +317,21 @@ function drawCover(
   box: Box,
   offsetX: number,
   toPdfY: (y: number) => number,
+  protectedRegions: Box[],
 ): void {
-  const width = box.right - box.left + COVER_PADDING.left + COVER_PADDING.right;
-  const height = box.bottom - box.top + COVER_PADDING.top + COVER_PADDING.bottom;
-  out.drawRectangle({
-    x: offsetX + box.left - COVER_PADDING.left,
-    y: toPdfY(box.bottom + COVER_PADDING.bottom),
-    width,
-    height,
-    color: COLORS.cover,
-  });
+  let covers = [{ left: box.left - COVER_PADDING.left, right: box.right + COVER_PADDING.right, top: box.top - COVER_PADDING.top, bottom: box.bottom + COVER_PADDING.bottom }];
+  for (const region of protectedRegions) {
+    covers = covers.flatMap(cover => {
+      const left = Math.max(cover.left, region.left), right = Math.min(cover.right, region.right);
+      const top = Math.max(cover.top, region.top), bottom = Math.min(cover.bottom, region.bottom);
+      if (left >= right || top >= bottom) return [cover];
+      return [
+        { ...cover, bottom: top }, { ...cover, top: bottom },
+        { left: cover.left, right: left, top, bottom }, { left: right, right: cover.right, top, bottom },
+      ].filter(part => part.right > part.left && part.bottom > part.top);
+    });
+  }
+  for (const cover of covers) out.drawRectangle({ x: offsetX + cover.left, y: toPdfY(cover.bottom), width: cover.right - cover.left, height: cover.bottom - cover.top, color: COLORS.cover });
 }
 
 /** Draw one line of translated text, degrading per character on failure. */

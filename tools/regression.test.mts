@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist';
 const root = path.resolve(import.meta.dirname, '..');
 Object.assign(globalThis, {
@@ -15,6 +15,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(path.join(root, 'node_module
 const { extractPages } = await import('../src/modules/extract/index.ts');
 const { renderBilingual } = await import('../src/modules/render/bilingual.ts');
 const { fitParagraph } = await import('../src/modules/render/inline.ts');
+const { wrapInline } = await import('../src/modules/render/inline.ts');
 const { pdfLibFontkit } = await import('../src/modules/render/fontkit.ts');
 async function fixture() {
     const doc = await PDFDocument.create();
@@ -132,4 +133,115 @@ test('bundled font embeds caron and author-name accents without missing glyphs',
         const text = (await (await doc.getPage(1)).getTextContent()).items.filter((item): item is pdfjs.TextItem => 'str' in item).map(item => item.str).join('');
         assert.match(text, /ˇ/);
     } finally { await doc.destroy(); }
+});
+
+test('rotated margin text stays outside horizontal prose and centered bold titles form one paragraph', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.TimesRoman);
+    const bold = await doc.embedFont(StandardFonts.TimesRomanBold);
+    const page = doc.addPage([400, 600]);
+    page.drawText('arXiv: rotated margin', { x: 20, y: 210, size: 20, font, rotate: degrees(90) });
+    page.drawText('Centered title first line', { x: 90, y: 540, size: 16, font: bold });
+    page.drawText('Second title line', { x: 112, y: 522, size: 16, font: bold });
+    page.drawText('Ordinary body text under the heading.', { x: 50, y: 460, size: 11, font });
+    const [extracted] = await extractPages(new Uint8Array(await doc.save()));
+    assert.doesNotMatch(extracted.paragraphs.map(p => p.source).join(' '), /arXiv|rotated margin/);
+    assert.ok(extracted.paragraphs.every(p => p.box.bottom - p.box.top < 60));
+    const title = extracted.paragraphs.find(p => p.source.includes('Centered title'))!;
+    assert.match(title.source, /Second title line/);
+    assert.equal(title.bold, true);
+    assert.equal(title.alignment, 'center');
+});
+
+test('sparse columns keep separate reading order and repeated page headers retain their source drawing', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.TimesRoman);
+    const pages = [doc.addPage([420, 600]), doc.addPage([420, 600])];
+    for (const page of pages) page.drawText('Recurring journal header', { x: 140, y: 568, size: 9, font });
+    for (let row = 0; row < 8; row++) {
+        pages[0].drawText('Left column follows a consistent order.', { x: 40, y: 530 - row * 13, size: 10, font });
+        pages[0].drawText('Right column follows a consistent order.', { x: 230, y: 530 - row * 13, size: 10, font });
+    }
+    for (let row = 0; row < 4; row++) {
+        pages[1].drawText('Sparse left prose remains in this column.', { x: 40, y: 520 - row * 13, size: 10, font });
+        pages[1].drawText('Sparse right prose remains in this column.', { x: 230, y: 290 - row * 13, size: 10, font });
+    }
+    const bytes = new Uint8Array(await doc.save());
+    for (const extracted of [await extractPages(bytes), await extractPages(bytes, { firstPage: 2, lastPage: 2 })]) {
+        const sparse = extracted.find(page => page.index === 1)!;
+        const body = sparse.paragraphs.filter(p => /Sparse/.test(p.source));
+        assert.equal(body.length, 2);
+        assert.match(body[0].source, /Sparse left/);
+        assert.doesNotMatch(body[0].source, /right/);
+        assert.match(body[1].source, /Sparse right/);
+        assert.ok(body.every(p => p.box.right - p.box.left < 185));
+        if (extracted.length > 1) assert.doesNotMatch(sparse.paragraphs.map(p => p.source).join(' '), /Recurring journal/);
+    }
+});
+
+test('numbered equations with roman labels and tall algorithm tables remain untranslated', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.TimesRoman);
+    doc.registerFontkit(pdfLibFontkit as never);
+    const math = await doc.embedFont(fs.readFileSync(path.join(root, 'addon/content/fonts/NotoSansSC-Regular.subset.ttf')), { subset: true });
+    const page = doc.addPage([400, 600]);
+    page.drawText('Prose before the numbered equation.', { x: 40, y: 545, size: 10, font });
+    page.drawText('α', { x: 100, y: 515, size: 10, font: math });
+    page.drawText('Kalman = log E (1)', { x: 110, y: 515, size: 10, font });
+    page.drawText('Prose after the numbered equation.', { x: 40, y: 480, size: 10, font });
+    for (const y of [440, 419, 215]) page.drawLine({ start: { x: 40, y }, end: { x: 330, y }, thickness: .5 });
+    page.drawText('Algorithm 1 Policy update', { x: 40, y: 427, size: 10, font });
+    page.drawText('1: Initialize policy parameters', { x: 45, y: 399, size: 10, font });
+    page.drawText('2: Compute gradient estimate', { x: 45, y: 310, size: 10, font });
+    page.drawText('3: Update policy and return', { x: 45, y: 230, size: 10, font });
+    page.drawText('Prose below the algorithm table.', { x: 40, y: 185, size: 10, font });
+    const [extracted] = await extractPages(new Uint8Array(await doc.save()));
+    const translatable = extracted.paragraphs.filter(p => !p.isFormulaBlock).map(p => p.source).join(' ');
+    assert.match(translatable, /before the numbered|after the numbered|below the algorithm/);
+    assert.doesNotMatch(translatable, /Kalman|Algorithm|Initialize|Compute gradient|Update policy/);
+    assert.ok(extracted.paragraphs.some(p => p.isFormulaBlock && p.math[0].text.includes('(1)')));
+});
+
+test('inline subscripts share one formula token and retain their vertical offset', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.TimesRoman);
+    doc.registerFontkit(pdfLibFontkit as never);
+    const math = await doc.embedFont(fs.readFileSync(path.join(root, 'addon/content/fonts/NotoSansSC-Regular.subset.ttf')), { subset: true });
+    const page = doc.addPage([400, 600]);
+    page.drawText('The return ', { x: 40, y: 530, size: 11, font });
+    page.drawText('α', { x: 86, y: 530, size: 11, font: math });
+    page.drawText('1', { x: 93, y: 527, size: 7, font: math });
+    page.drawText('2', { x: 96.5, y: 525, size: 5, font: math });
+    page.drawText(' is estimated.', { x: 100, y: 530, size: 11, font });
+    const [extracted] = await extractPages(new Uint8Array(await doc.save()));
+    const paragraph = extracted.paragraphs.find(p => p.source.includes('The return'))!;
+    assert.equal(paragraph.math.length, 1);
+    assert.equal(paragraph.math[0].text, 'α12');
+    assert.match(paragraph.source, /The return ⟦M1⟧ is estimated/);
+    assert.ok(paragraph.math[0].outlines!.some(glyph => (glyph.y ?? 0) >= 3));
+    assert.equal(paragraph.math[0].outlines!.length, 3);
+    assert.ok(paragraph.math[0].outlines!.some(glyph => (glyph.y ?? 0) >= 5));
+    const check = await PDFDocument.create();
+    check.registerFontkit(pdfLibFontkit as never);
+    const translationFont = await check.embedFont(fs.readFileSync(path.join(root, 'addon/content/fonts/NotoSansSC-Regular.subset.ttf')));
+    const fit = fitParagraph('回报⟦M1⟧被估计。', paragraph, translationFont);
+    assert.ok(fit.fits);
+    assert.ok(fit.size <= paragraph.fontSize);
+    const punctuation = wrapInline('测试。中文', paragraph, translationFont, 10, 20).map(line => line.map(piece => piece.text ?? '').join(''));
+    assert.equal(punctuation.join(''), '测试。中文');
+    assert.ok(punctuation.every(line => !/^[。！？；：）]/u.test(line)));
+});
+
+test('prose near display math is translated while covers exclude original equation regions', async () => {
+    const bytes = await fixture();
+    const [page] = await extractPages(bytes);
+    const index = page.paragraphs.findIndex(p => p.source.includes('Body below table'));
+    const body = page.paragraphs[index];
+    const protectedRegion = { left: body.box.left + 90, right: body.box.left + 120, top: body.box.bottom - 2, bottom: body.box.bottom + 12 };
+    page.protectedRegions!.push(protectedRegion);
+    const result = await renderBilingual({ sourceBytes: bytes, pages: [page], translations: new Map([[`0:${index}`, '表格下方的正文。']]), debug: true });
+    assert.equal(result.debug[index].translated, true);
+    assert.equal(result.overflowBoxes, 0);
+    const source = await PDFDocument.load(result.bytes);
+    assert.equal(source.getPageCount(), 1);
 });

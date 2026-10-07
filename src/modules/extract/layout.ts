@@ -63,6 +63,11 @@ export function toRuns(
     // baseline is rotated into display space together with the advance vector.
     const axis = Math.hypot(t[0], t[1]) || 1;
     const start = geometry.toNormalized(t[4], t[5]);
+    const direction = geometry.toNormalized(t[4] + t[0] / axis, t[5] + t[1] / axis);
+    // Rotated margin labels keep their source drawing and never enter horizontal prose.
+    if (direction.x <= start.x || Math.abs(direction.y - start.y) > Math.abs(direction.x - start.x) * 0.15) {
+      continue;
+    }
     const end = geometry.toNormalized(
       t[4] + (t[0] / axis) * advance,
       t[5] + (t[1] / axis) * advance,
@@ -77,6 +82,7 @@ export function toRuns(
       fontName: resolveFont(item.fontName),
       fontId: item.fontName,
       fontSize,
+      baseline: start.y,
     });
   }
   return runs;
@@ -120,10 +126,8 @@ export function lineBox(line: TextLine): Box {
 function makeLine(runs: TextRun[], column: number): TextLine {
   runs.sort((a, b) => a.x - b.x);
   const box = boundsOf(runs);
-  const baseline = runs.reduce(
-    (lowest, run) => Math.max(lowest, run.y + run.fontSize * 0.88),
-    box.top,
-  );
+  const principal = [...runs].sort((a, b) => b.fontSize - a.fontSize || b.text.length - a.text.length)[0];
+  const baseline = principal.baseline ?? principal.y + principal.fontSize * 0.88;
   return {
     runs,
     x: box.left,
@@ -148,20 +152,34 @@ function makeLine(runs: TextRun[], column: number): TextLine {
  * reading order, because spanning lines delimit reading regions.
  *
  * @param runs - runs on one page.
+ * @param fallbackGutter - column position inferred from other pages of the document.
  * @returns lines in top-to-bottom order, each tagged with its column.
  */
-export function buildLines(runs: TextRun[]): TextLine[] {
+export function buildLines(runs: TextRun[], fallbackGutter?: number | null): TextLine[] {
   if (!runs.length) {
     return [];
   }
   const raw = groupByBaseline(runs);
-  const gutter = findGutter(raw);
+  const gutter = findGutter(raw) ?? gutterFromAlignedStarts(runs) ?? fallbackGutter ?? null;
+  lastGutter = gutter;
 
   const lines: TextLine[] = [];
   for (const line of raw) {
     lines.push(...assignColumn(line, gutter));
   }
-  return lines.sort((a, b) => a.y - b.y || a.x - b.x);
+  const attached = new Set<TextLine>();
+  for (const line of lines) {
+    if (attached.has(line) || line.text.length > 16) continue;
+    const size = lineFontSize(line);
+    const candidates = lines.filter(other => other !== line && !attached.has(other) && other.column === line.column && lineFontSize(other) > size / 0.85 && Math.abs(other.baseline - line.baseline) < lineFontSize(other) * 0.8 && other.x <= line.x + line.width + 2 && other.x + other.width >= line.x - 2);
+    candidates.sort((a, b) => Math.abs(a.baseline - line.baseline) - Math.abs(b.baseline - line.baseline));
+    const target = candidates[0];
+    if (target) {
+      Object.assign(target, makeLine([...target.runs, ...line.runs], target.column));
+      attached.add(line);
+    }
+  }
+  return lines.filter(line => !attached.has(line)).sort((a, b) => a.y - b.y || a.x - b.x);
 }
 
 /** Gutter detected for the most recent `buildLines` call; diagnostics only. */
@@ -169,39 +187,50 @@ export let lastGutter: number | null = null;
 
 /** Group runs into unsplit lines by baseline proximity. */
 function groupByBaseline(runs: TextRun[]): TextLine[] {
-  const sorted = [...runs].sort((a, b) => a.y - b.y || a.x - b.x);
-  const lines: TextLine[] = [];
-  let bucket: TextRun[] = [];
-  let anchorY = Number.NaN;
-  let anchorSize = 10;
-
-  const close = () => {
-    if (bucket.length) {
-      lines.push(makeLine(bucket, -2));
-      bucket = [];
-    }
-  };
-
+  const buckets: Array<{ baseline: number; size: number; runs: TextRun[] }> = [];
+  // Principal glyphs establish baselines before their smaller attached scripts.
+  const sorted = [...runs].sort((a, b) => b.fontSize - a.fontSize || b.text.length - a.text.length);
   for (const run of sorted) {
-    if (Number.isNaN(anchorY)) {
-      anchorY = run.y;
-      anchorSize = run.fontSize;
-      bucket.push(run);
-      continue;
-    }
-    const tolerance = BASELINE_TOLERANCE * Math.max(anchorSize, run.fontSize);
-    if (Math.abs(run.y - anchorY) <= tolerance) {
-      bucket.push(run);
-      anchorSize = Math.max(anchorSize, run.fontSize);
-    } else {
-      close();
-      anchorY = run.y;
-      anchorSize = run.fontSize;
-      bucket.push(run);
-    }
+    const baseline = run.baseline ?? run.y + run.fontSize * 0.88;
+    const candidates = buckets.filter(bucket => Math.abs(bucket.baseline - baseline) <= BASELINE_TOLERANCE * bucket.size);
+    candidates.sort((a, b) => Math.abs(a.baseline - baseline) - Math.abs(b.baseline - baseline));
+    const bucket = candidates[0];
+    if (bucket) bucket.runs.push(run);
+    else buckets.push({ baseline, size: run.fontSize, runs: [run] });
   }
-  close();
-  return lines;
+  return buckets.map(bucket => makeLine(bucket.runs, -2)).sort((a, b) => a.y - b.y);
+}
+
+/**
+ * Locate a column gutter when this page has enough paired text lines.
+ * @param runs - horizontal text outside figures and tables.
+ * @returns the gutter centre, or null when this page alone supplies insufficient evidence.
+ */
+export function findColumnGutter(runs: TextRun[]): number | null {
+  return findGutter(groupByBaseline(runs)) ?? gutterFromAlignedStarts(runs);
+}
+
+/** Infer sparse columns from repeated left edges with a shared empty gutter. */
+function gutterFromAlignedStarts(runs: TextRun[]): number | null {
+  if (!runs.length) return null;
+  const block = boundsOf(runs), width = block.right - block.left;
+  if (width < 240) return null;
+  const candidates = runs.filter(run => run.width > width * 0.2 && run.width < width * 0.6 && run.text.length > 12);
+  const clusters: TextRun[][] = [];
+  for (const run of candidates.sort((a, b) => a.x - b.x)) {
+    const cluster = clusters[clusters.length - 1];
+    if (cluster && run.x - cluster[0].x < 4) cluster.push(run);
+    else clusters.push([run]);
+  }
+  const repeated = clusters.filter(cluster => cluster.length >= 4);
+  for (const left of [...repeated].sort((a, b) => b.length - a.length)) {
+    const right = repeated.filter(cluster => cluster[0].x - left[0].x > width * 0.35).sort((a, b) => b.length - a.length)[0];
+    if (!right) continue;
+    const ends = left.map(run => run.x + run.width).sort((a, b) => a - b);
+    const edge = ends[Math.floor(ends.length * 0.8)];
+    if (right[0].x - edge >= COLUMN_GAP_MIN_PT) return (right[0].x + edge) / 2;
+  }
+  return null;
 }
 
 /**
@@ -448,6 +477,14 @@ export function toParagraphs(lines: TextLine[]): TextLine[][] {
   const edges = columnEdges(lines);
   let current: TextLine[] = [];
   let previousIndex = -1;
+  const spacing = lines.flatMap((line, index) => {
+    const previous = lines[index - 1];
+    if (!previous || previous.column !== line.column) return [];
+    const size = Math.max(lineFontSize(previous), lineFontSize(line));
+    const ratio = (line.baseline - previous.baseline) / size;
+    return ratio > 0.85 && ratio < 1.7 ? [ratio] : [];
+  }).sort((a, b) => a - b);
+  const usualLeadingRatio = spacing[Math.floor(spacing.length / 2)] ?? 1.2;
 
   const flush = () => {
     if (current.length) {
@@ -464,14 +501,18 @@ export function toParagraphs(lines: TextLine[]): TextLine[][] {
       const gap = line.y - (previous.y + previous.height);
       const leading = Math.max(lineFontSize(previous), lineFontSize(line));
       const shortLine = previous.width < columnWidth * 0.82;
+      const previousSize = lineFontSize(previous);
+      const nextSize = lineFontSize(line);
+      const centeredPair = previous.runs.some(run => /Bold|Medi|Demi|CMBX|Semibold/i.test(run.fontName)) && line.runs.some(run => /Bold|Medi|Demi|CMBX|Semibold/i.test(run.fontName)) && Math.abs(previous.x + previous.width / 2 - line.x - line.width / 2) < leading * 0.25;
       if (
         line.column !== previous.column ||
-        Math.abs(lineFontSize(line)-lineFontSize(previous)) > leading * 0.15 ||
+        Math.abs(nextSize - previousSize) > leading * 0.15 ||
         /^\s*[•●]/.test(line.text) ||
-        (line.x > previous.x + leading * 0.65 && line.x < previous.x + leading * 3 && !/^\s*[•●]/.test(previous.text)) ||
+        (line.column >= 0 && !centeredPair && line.x > previous.x + leading * 0.65 && line.x < previous.x + leading * 3 && !/^\s*[•●]/.test(previous.text)) ||
+        line.baseline - previous.baseline > leading * usualLeadingRatio * 1.3 ||
         gap > leading * 0.65 ||
-        shortLine ||
-        line.x > previous.x + Math.max(12, leading)
+        (shortLine && !centeredPair) ||
+        (!centeredPair && line.x > previous.x + Math.max(12, leading))
       ) {
         flush();
       }

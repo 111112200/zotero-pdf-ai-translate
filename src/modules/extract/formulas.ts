@@ -18,7 +18,7 @@ import type { MathSpan, TextLine, TextRun } from "./types";
 /** Fonts that indicate mathematical typesetting. */
 const MATH_FONT_PATTERN = new RegExp(
   [
-    "CM[^R]", // Computer Modern maths (CMMI, CMSY, CMEX); CMR is body text
+    "CMMI|CMSY|CMEX|CMMIB", // Computer Modern math faces; CMR, CMBX and CMSS are prose
     "MS[AM]M", // AMS maths
     "MT(MI|SY|EX)", // MathTime
     "XY", // XY-pic
@@ -138,6 +138,9 @@ export function lineMathShare(line: TextLine): number {
  * @returns true when the line should be reproduced verbatim instead of translated.
  */
 export function isDisplayFormula(line: TextLine): boolean {
+  if (line.runs.some(run => run.isMath) && /\(\d+[a-z]?\)\s*$/i.test(line.text) && (line.text.match(/[A-Za-z]{3,}/g)?.length ?? 0) <= 2) {
+    return true;
+  }
   if (lineMathShare(line) >= LINE_MATH_SHARE_THRESHOLD) {
     return true;
   }
@@ -160,19 +163,46 @@ export function extractMathPlaceholders(
   sink: MathSpan[],
 ): string {
   const parts: string[] = [];
-  for (const run of line.runs) {
-    if (run.isMath) {
-      const text = run.text.trim();
-      if (!text) {
-        continue;
+  const formula = new Set(line.runs.filter(run => run.isMath));
+  const size = Math.max(...line.runs.map(run => run.fontSize));
+  let extended = true;
+  while (extended) {
+    extended = false;
+    line.runs.forEach((run, index) => {
+      if (formula.has(run)) return;
+      const accessory = /^[\d\s+−=×/|()[\]{}<>.,:ˆ¯]+$/u.test(run.text) || (run.fontSize < size * 0.85 && run.text.length <= 12) || /^(?:true|Kalman|log|exp|max|min)$/.test(run.text);
+      if (!accessory) return;
+      const previous = line.runs[index - 1], next = line.runs[index + 1];
+      if ((previous && formula.has(previous) && run.x - previous.x - previous.width < size * 0.55) || (next && formula.has(next) && next.x - run.x - run.width < size * 0.55)) {
+        formula.add(run);
+        extended = true;
       }
-      const token = `⟦M${sink.length + 1}⟧`;
-      sink.push({ token, text, outlines: run.outlines, fontSize: run.fontSize, box: { left: run.x, top: run.y, right: run.x + run.width, bottom: run.y + run.height } });
-      parts.push(token);
+    });
+  }
+  let group: TextRun[] = [];
+  const flush = () => {
+    if (!group.length) return;
+    const token = `⟦M${sink.length + 1}⟧`;
+    const left = Math.min(...group.map(run => run.x));
+    const principal = [...group].sort((a, b) => b.fontSize - a.fontSize)[0];
+    const baseline = line.baseline;
+    const available = group.every(run => run.outlines !== undefined);
+    const outlines = available ? group.flatMap(run => run.outlines!.map(glyph => ({ path: glyph.path, x: run.x - left + glyph.x, y: (run.baseline ?? run.y + run.fontSize * 0.88) - baseline + (glyph.y ?? 0) }))) : undefined;
+    sink.push({ token, text: group.map(run => run.text).join(""), outlines, baseline, fontSize: principal.fontSize, box: { left, top: Math.min(...group.map(run => run.y)), right: Math.max(...group.map(run => run.x + run.width)), bottom: Math.max(...group.map(run => run.y + run.height)) } });
+    parts.push(token);
+    group = [];
+  };
+  for (const run of line.runs) {
+    if (formula.has(run)) {
+      const previous = group[group.length - 1];
+      if (previous && run.x - previous.x - previous.width > size * 0.75) flush();
+      group.push(run);
     } else {
+      flush();
       parts.push(run.text);
     }
   }
+  flush();
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 

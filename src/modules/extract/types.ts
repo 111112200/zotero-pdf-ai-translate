@@ -22,6 +22,8 @@ export interface TextRun {
   outlines?: MathGlyph[];
   /** Effective font size derived from the text matrix. */
   fontSize: number;
+  /** Original baseline measured downwards in display coordinates. */
+  baseline?: number;
   /** Set once formula detection has classified this run. */
   isMath?: boolean;
 }
@@ -52,6 +54,8 @@ export interface MathGlyph {
   path: string;
   /** Advance from the start of the math run. */
   x: number;
+  /** Vertical offset for an attached subscript or superscript. */
+  y?: number;
 }
 
 /** A formula occurrence that must survive translation verbatim. */
@@ -61,6 +65,8 @@ export interface MathSpan {
   /** Original glyph rectangle, retained for vector reproduction. */
   box?: Box;
   fontSize?: number;
+  /** Original baseline shared by this formula's principal glyphs. */
+  baseline?: number;
   /** Original glyph contours; no complete-page drawing is needed. */
   outlines?: MathGlyph[];
   /** Original text, re-inserted into the translation. */
@@ -106,6 +112,10 @@ export interface Paragraph {
   fontSize: number;
   /** Original baseline-to-baseline distance. */
   leading: number;
+  /** True when most source text uses a bold font. */
+  bold?: boolean;
+  /** Alignment inherited from centered source headings. */
+  alignment?: "left" | "center";
 }
 
 /** Everything the renderer needs from one source page. */
