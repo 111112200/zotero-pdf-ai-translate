@@ -232,6 +232,40 @@ test('inline subscripts share one formula token and retain their vertical offset
     assert.ok(punctuation.every(line => !/^[。！？；：）]/u.test(line)));
 });
 
+test('normalized micro and ohm signs retain original math glyphs and translated prose', async () => {
+    const doc = await PDFDocument.create();
+    const prose = await doc.embedFont(StandardFonts.TimesRoman);
+    doc.registerFontkit(pdfLibFontkit as never);
+    const math = await doc.embedFont(fs.readFileSync(path.join(root, 'addon/content/fonts/NotoSansSC-Regular.subset.ttf')), { subset: true });
+    const page = doc.addPage([400, 600]);
+    for (const [i, symbol] of ['µ', 'Ω'].entries()) {
+        const y = 530 - i * 50;
+        page.drawText('Parameter ', { x: 40, y, size: 11, font: prose });
+        page.drawText(symbol, { x: 90, y, size: 11, font: math });
+        page.drawText(' is estimated.', { x: 104, y, size: 11, font: prose });
+    }
+    const bytes = new Uint8Array(await doc.save());
+    const [extracted] = await extractPages(bytes);
+    assert.equal(extracted.paragraphs.length, 2);
+    const translations = new Map<string, string>();
+    for (const [index, paragraph] of extracted.paragraphs.entries()) {
+        assert.equal(paragraph.isFormulaBlock, false);
+        assert.equal(paragraph.math.length, 1);
+        assert.equal(paragraph.math[0].text, ['μ', 'Ω'][index]);
+        assert.ok(paragraph.math[0].outlines?.some(glyph => glyph.path.length > 0));
+        translations.set(`0:${index}`, '参数⟦M1⟧被估计。');
+    }
+    const rendered = await renderBilingual({ sourceBytes: bytes, pages: [extracted], translations, debug: true });
+    assert.equal(rendered.preservedMathParagraphs, 0);
+    assert.equal(rendered.overflowBoxes, 0);
+    assert.ok(rendered.debug.every(decision => decision.translated));
+    const parsed = await pdfjs.getDocument({ data: rendered.bytes.slice() }).promise;
+    try {
+        const text = (await (await parsed.getPage(1)).getTextContent()).items.filter((item): item is pdfjs.TextItem => 'str' in item).map(item => item.str).join('');
+        assert.equal(text.match(/参数/g)?.length, 2);
+    } finally { await parsed.destroy(); }
+});
+
 test('prose near display math is translated while covers exclude original equation regions', async () => {
     const bytes = await fixture();
     const [page] = await extractPages(bytes);

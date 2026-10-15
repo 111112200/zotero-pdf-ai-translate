@@ -1,5 +1,6 @@
 /** Original math glyph outlines, without replaying a complete source page. */
 import { create } from 'fontkit';
+import { normalizeUnicode } from 'pdfjs-dist';
 import type { FontResolvablePage } from './pdfjs';
 import type { Operators } from './graphics';
 import type { MathGlyph, TextRun } from './types';
@@ -25,7 +26,9 @@ export function mathOutlineReader(page: FontResolvablePage, list: Operators, ops
       let glyphs = records.get(currentFont);
       if (!glyphs) records.set(currentFont, glyphs = new Map());
       for (const glyph of args[0] as Array<GlyphRecord | number>) {
-        if (typeof glyph !== 'number' && glyph?.unicode && glyph.fontChar) glyphs.set(glyph.unicode, glyph);
+        // Text items normalize compatibility characters such as µ to μ; fontChar
+        // still identifies the original glyph in the embedded font.
+        if (typeof glyph !== 'number' && glyph?.unicode && glyph.fontChar) glyphs.set(normalizeUnicode(glyph.unicode), glyph);
       }
     }
   }
