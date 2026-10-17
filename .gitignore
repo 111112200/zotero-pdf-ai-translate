@@ -12,6 +12,8 @@ build/
 tools/_variants/
 tools/_bisect/
 tools/_out/
+tools/_review/
+tools/_probe/
 output/
 
 # Regenerated from node_modules by tools/sync-pdfjs.mjs, which the build and

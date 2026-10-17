@@ -14,6 +14,7 @@
  */
 
 import type { MathSpan, TextLine, TextRun } from "./types";
+import { needsSpace } from "./layout";
 
 /** Fonts that indicate mathematical typesetting. */
 const MATH_FONT_PATTERN = new RegExp(
@@ -144,7 +145,11 @@ export function isDisplayFormula(line: TextLine): boolean {
   if (lineMathShare(line) >= LINE_MATH_SHARE_THRESHOLD) {
     return true;
   }
-  const words = line.text.match(/[\p{L}]{3,}/gu);
+  // "No word of two letters or more" is what a bare symbol row looks like. It
+  // used to require three, which turned short prose fragments and two-character
+  // headings ("et al.", "No. 4", "pp. 12-15", "摘要") into untranslatable
+  // display formulas, splitting the paragraphs they belonged to as well.
+  const words = line.text.match(/[\p{L}]{2,}/gu);
   return !words && /\S/.test(line.text) && line.text.length <= 80;
 }
 
@@ -170,7 +175,14 @@ export function extractMathPlaceholders(
     extended = false;
     line.runs.forEach((run, index) => {
       if (formula.has(run)) return;
-      const accessory = /^[\d\s+−=×/|()[\]{}<>.,:ˆ¯]+$/u.test(run.text) || (run.fontSize < size * 0.85 && run.text.length <= 12) || /^(?:true|Kalman|log|exp|max|min)$/.test(run.text);
+      // A run that carries a real word is prose, never part of the equation:
+      // swallowing it would drop those words from the text sent to the model
+      // and replay them as untranslated glyphs inside the translated sentence.
+      const wordy = /[A-Za-z]{3,}/.test(run.text);
+      const accessory =
+        /^[\d\s+−=×/|()[\]{}<>.,:ˆ¯]+$/u.test(run.text) ||
+        (!wordy && run.fontSize < size * 0.85 && run.text.length <= 12) ||
+        /^(?:true|Kalman|log|exp|max|min)$/.test(run.text);
       if (!accessory) return;
       const previous = line.runs[index - 1], next = line.runs[index + 1];
       if ((previous && formula.has(previous) && run.x - previous.x - previous.width < size * 0.55) || (next && formula.has(next) && next.x - run.x - run.width < size * 0.55)) {
@@ -180,6 +192,18 @@ export function extractMathPlaceholders(
     });
   }
   let group: TextRun[] = [];
+  // Runs are joined the way they are laid out: a space goes in only where the
+  // measured gap calls for one. Joining every run with a space used to insert
+  // them inside words and on both sides of every inline formula, which the model
+  // then faithfully reproduced as "( α )".
+  let previous: TextRun | undefined;
+  const emit = (text: string, first: TextRun, last: TextRun) => {
+    if (previous && needsSpace(previous, first)) {
+      parts.push(" ");
+    }
+    parts.push(text);
+    previous = last;
+  };
   const flush = () => {
     if (!group.length) return;
     const token = `⟦M${sink.length + 1}⟧`;
@@ -189,20 +213,20 @@ export function extractMathPlaceholders(
     const available = group.every(run => run.outlines !== undefined);
     const outlines = available ? group.flatMap(run => run.outlines!.map(glyph => ({ path: glyph.path, x: run.x - left + glyph.x, y: (run.baseline ?? run.y + run.fontSize * 0.88) - baseline + (glyph.y ?? 0) }))) : undefined;
     sink.push({ token, text: group.map(run => run.text).join(""), outlines, baseline, fontSize: principal.fontSize, box: { left, top: Math.min(...group.map(run => run.y)), right: Math.max(...group.map(run => run.x + run.width)), bottom: Math.max(...group.map(run => run.y + run.height)) } });
-    parts.push(token);
+    emit(token, group[0], group[group.length - 1]);
     group = [];
   };
   for (const run of line.runs) {
     if (formula.has(run)) {
-      const previous = group[group.length - 1];
-      if (previous && run.x - previous.x - previous.width > size * 0.75) flush();
+      const previousRun = group[group.length - 1];
+      if (previousRun && run.x - previousRun.x - previousRun.width > size * 0.75) flush();
       group.push(run);
     } else {
       flush();
-      parts.push(run.text);
+      emit(run.text, run, run);
     }
   }
   flush();
-  return parts.join(" ").replace(/\s+/g, " ").trim();
+  return parts.join("").replace(/\s+/g, " ").trim();
 }
 

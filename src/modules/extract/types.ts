@@ -86,6 +86,19 @@ export interface Box {
 }
 
 /**
+ * A filled area of a source page together with its colour.
+ *
+ * The renderer paints covers over the original text; on anything but a white
+ * page a white cover is visible, so each cover takes the colour of the smallest
+ * recorded region that contains it.
+ */
+export interface ShadedRegion {
+  box: Box;
+  /** Fill colour as 0..1 RGB. */
+  color: [number, number, number];
+}
+
+/**
  * A paragraph in reading order together with the geometry needed to draw its
  * translation back into the same place on the page.
  *
@@ -125,9 +138,22 @@ export interface PageContent {
   width: number;
   height: number;
   rotate: number;
+  /**
+   * The visible page box in PDF user space, i.e. pdf.js `page.view`
+   * (`CropBox` ∩ `MediaBox`). The renderer needs it because the page's content
+   * stream is authored in user space, whose origin is this box's corner — not
+   * necessarily `(0, 0)`. Embedding without compensating for it shifts the
+   * drawn page away from the coordinates the extractor reported, which moves
+   * the translation and misses the original text with the covers.
+   */
+  view: number[];
   paragraphs: Paragraph[];
   /** Graphic and table placements excluded from translation. */
   protectedRegions?: Box[];
+  /** Non-white filled areas, used to paint covers in the background colour. */
+  shadedRegions?: ShadedRegion[];
+  /** True when the page could not be inspected, so it is exported untranslated. */
+  skipped?: boolean;
   /** Raster image placements found on the page, for diagnostics. */
   imageCount: number;
 }

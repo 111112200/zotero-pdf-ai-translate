@@ -137,9 +137,22 @@ export async function openDocument(
     fontExtraProperties: true,
     useSystemFonts: false,
   });
-  const doc = (await task.promise) as unknown as PDFDocumentLike & {
-    destroy: () => Promise<void>;
-  };
+  let doc: PDFDocumentLike & { destroy: () => Promise<void> };
+  try {
+    doc = (await task.promise) as unknown as PDFDocumentLike & {
+      destroy: () => Promise<void>;
+    };
+  } catch (error) {
+    // pdf-lib can be told to ignore encryption, but pdf.js cannot: it fails
+    // before any page is parsed. Say so instead of surfacing its internal
+    // PasswordException, which reads like a bug.
+    if ((error as { name?: string } | undefined)?.name === "PasswordException") {
+      throw new Error(
+        "This PDF is password-protected. Remove the password, then try again.",
+      );
+    }
+    throw error;
+  }
   const destroy = doc.destroy.bind(doc);
   doc.destroy = async () => {
     try {

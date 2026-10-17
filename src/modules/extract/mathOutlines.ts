@@ -8,7 +8,7 @@ import type { MathGlyph, TextRun } from './types';
 interface GlyphRecord { unicode: string; fontChar: string; width: number }
 interface OutlineFont {
   unitsPerEm: number;
-  glyphForCodePoint(cp: number): { id: number; path: { scale(x: number, y: number): { toSVG(): string } } };
+  glyphForCodePoint(cp: number): { id: number; advanceWidth?: number; path: { scale(x: number, y: number): { toSVG(): string } } };
 }
 
 /** Build a per-page outline reader from resolved PDF fonts and encoded glyphs. */
@@ -27,8 +27,15 @@ export function mathOutlineReader(page: FontResolvablePage, list: Operators, ops
       if (!glyphs) records.set(currentFont, glyphs = new Map());
       for (const glyph of args[0] as Array<GlyphRecord | number>) {
         // Text items normalize compatibility characters such as µ to μ; fontChar
-        // still identifies the original glyph in the embedded font.
-        if (typeof glyph !== 'number' && glyph?.unicode && glyph.fontChar) glyphs.set(normalizeUnicode(glyph.unicode), glyph);
+        // still identifies the original glyph in the embedded font. Both the raw
+        // and the normalized spelling are indexed, because a ligature normalizes
+        // to two characters and would otherwise never match a one-character
+        // lookup — which made the whole run look undecodable.
+        if (typeof glyph !== 'number' && glyph?.unicode && glyph.fontChar) {
+          if (!glyphs.has(glyph.unicode)) glyphs.set(glyph.unicode, glyph);
+          const normalized = normalizeUnicode(glyph.unicode);
+          if (!glyphs.has(normalized)) glyphs.set(normalized, glyph);
+        }
       }
     }
   }
@@ -46,13 +53,23 @@ export function mathOutlineReader(page: FontResolvablePage, list: Operators, ops
     }
     const font = fonts.get(id), glyphs = records.get(id);
     if (!font || !glyphs) return undefined;
+    // Whitespace still advances the pen. Its width comes from the font: the
+    // hard-coded 250 units was only right at 1000 units per em, and shifted
+    // every glyph after a space inside a multi-word formula on a 2048-unit font.
+    let spaceWidth = font.unitsPerEm * 0.25;
+    try {
+      const space = font.glyphForCodePoint(0x20) as { advanceWidth?: number } | undefined;
+      if (space?.advanceWidth) spaceWidth = space.advanceWidth;
+    } catch {
+      // Keep the 0.25 em estimate.
+    }
     const encoded: GlyphRecord[] = [];
     for (const ch of run.text) {
       if (/\s/.test(ch)) {
-        encoded.push({unicode: ch, fontChar: "", width: 250});
+        encoded.push({ unicode: ch, fontChar: "", width: spaceWidth });
         continue;
       }
-      const glyph = glyphs.get(ch);
+      const glyph = glyphs.get(ch) ?? glyphs.get(normalizeUnicode(ch));
       if (!glyph) return undefined;
       encoded.push(glyph);
     }

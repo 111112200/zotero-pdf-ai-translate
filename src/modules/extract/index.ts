@@ -10,7 +10,7 @@ import {
   isDisplayFormula,
   isMathRun,
 } from "./formulas";
-import { graphicRegions, insideGraphic, textTableRegions, type Operators } from "./graphics";
+import { filledBackgrounds, graphicRegions, insideGraphic, textTableRegions, type Operators } from "./graphics";
 import { mathOutlineReader } from "./mathOutlines";
 import { documentGutters, repeatedMarginRuns } from "./documentLayout";
 import { pageGeometry } from "./geometry";
@@ -23,7 +23,7 @@ import {
   toRuns,
 } from "./layout";
 import { openDocument, pdfjsOps, resolveFontName } from "./pdfjs";
-import type { Box, MathSpan, PageContent, Paragraph, TextLine, TextRun } from "./types";
+import type { Box, MathSpan, PageContent, Paragraph, ShadedRegion, TextLine, TextRun } from "./types";
 
 /** Raster image paint operations, used to count figures on a page. */
 const IMAGE_OP_NAMES = [
@@ -55,7 +55,6 @@ interface RawPage extends Omit<PageContent, "paragraphs"> {
   readOutline: ReturnType<typeof mathOutlineReader>;
   cleanup: () => void;
 }
-
 /**
  * Extract every page of a PDF into paragraphs with reading order and geometry.
  *
@@ -101,7 +100,7 @@ export async function extractPages(
         }
       }
       const paragraphs = buildParagraphs(lines);
-      pages.push({ index: page.index, width: page.width, height: page.height, rotate: page.rotate, protectedRegions: [...page.protectedRegions ?? [], ...paragraphs.filter(paragraph => paragraph.isFormulaBlock).map(paragraph => paragraph.box)], imageCount: page.imageCount, paragraphs });
+      pages.push({ index: page.index, width: page.width, height: page.height, rotate: page.rotate, view: page.view, shadedRegions: page.shadedRegions, skipped: page.skipped, protectedRegions: [...page.protectedRegions ?? [], ...paragraphs.filter(paragraph => paragraph.isFormulaBlock).map(paragraph => paragraph.box)], imageCount: page.imageCount, paragraphs });
       page.cleanup();
     }
   } finally {
@@ -119,17 +118,42 @@ async function extractPage(
 ): Promise<RawPage> {
   // pdf.js takes a 1-based page number.
   const page = (await doc.getPage(index + 1)) as PageLike;
+  const geometry = pageGeometry(page.view, page.rotate);
+  const base = {
+    index,
+    width: geometry.width,
+    height: geometry.height,
+    rotate: geometry.rotate,
+    // Kept verbatim: the renderer embeds each page through this box so the
+    // drawn copy lands in the same coordinates the runs were measured in.
+    view: [...page.view],
+    protectedRegions: [] as Box[],
+    shadedRegions: [] as ShadedRegion[],
+    imageCount: 0,
+  };
   // getOperatorList() resolves the page's common objects, which is what makes
   // the real embedded font names reachable from resolveFontName().
-  const [textContent, operatorList] = await Promise.all([
-    page.getTextContent(),
-    page.getOperatorList().catch((error: unknown) => {
-      ztoolkit.log(`operator list unavailable on page ${index + 1}`, error);
-      throw new Error(`Cannot inspect graphics on page ${index + 1}: ${String(error)}`);
-    }),
-  ]);
+  const textContentPromise = page.getTextContent();
+  let operatorList: Operators;
+  try {
+    operatorList = await page.getOperatorList();
+  } catch (error) {
+    // Without the operator list there is no way to tell a figure from prose, and
+    // covering text we cannot see would damage the figures. Leave this page in
+    // its original language and report it, rather than losing the whole export.
+    ztoolkit.log(`operator list unavailable on page ${index + 1}`, error);
+    await textContentPromise.catch(() => undefined);
+    page.cleanup();
+    return {
+      ...base,
+      runs: [],
+      skipped: true,
+      readOutline: () => undefined,
+      cleanup: () => {},
+    };
+  }
+  const textContent = await textContentPromise;
 
-  const geometry = pageGeometry(page.view, page.rotate);
   const runs = toRuns(textContent.items, geometry, (loadedName) =>
     resolveFontName(page, loadedName),
   );
@@ -145,6 +169,10 @@ async function extractPage(
     width: geometry.width,
     height: geometry.height,
     rotate: geometry.rotate,
+    // Kept verbatim: the renderer embeds each page through this box so the
+    // drawn copy lands in the same coordinates the runs were measured in.
+    view: [...page.view],
+    shadedRegions: filledBackgrounds(operatorList, pdfjsOps() ?? {}, geometry),
     runs: runs.filter(run => !insideGraphic(run, protectedRegions)),
     readOutline,
     cleanup: () => page.cleanup(),
@@ -254,6 +282,22 @@ function unionBox(boxes: Box[]): Box {
   );
 }
 
+/**
+ * Nominal text size of a line for paragraph metrics.
+ *
+ * Math runs are skipped: a display-style operator set inline is much larger than
+ * the prose around it, and taking the line maximum then made the whole
+ * paragraph's translation fit itself to that bigger size.
+ *
+ * @param line - a line in reading order.
+ * @returns the largest non-math run size, or the line's own size when the line is all math.
+ */
+export function lineBodyFontSize(line: TextLine): number {
+  const body = line.runs.filter(run => !run.isMath);
+  const pool = body.length ? body : line.runs;
+  return Math.max(0, ...pool.map(run => run.fontSize)) || lineFontSize(line);
+}
+
 /** Font size, leading and baseline positions of a paragraph. */
 function paragraphGeometry(group: TextLine[], allLines: TextLine[]): {
   baselines: number[];
@@ -262,7 +306,7 @@ function paragraphGeometry(group: TextLine[], allLines: TextLine[]): {
   bold: boolean;
   alignment: "left" | "center";
 } {
-  const sizes = group.map(lineFontSize).sort((a, b) => a - b);
+  const sizes = group.map(lineBodyFontSize).sort((a, b) => a - b);
   const fontSize = sizes[Math.floor(sizes.length / 2)] ?? 10;
   const baselines = group.map((line) => line.baseline).sort((a, b) => a - b);
   let leading = fontSize * 1.2;

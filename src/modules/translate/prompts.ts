@@ -80,15 +80,19 @@ export function userPrompt(segments: Segment[]): string {
 /**
  * Placeholder tokens that appear in a translated segment.
  *
+ * The exact token strings matter, not just the numbers they carry: the renderer
+ * looks a token up by string, so a reply that rewrites `⟦M1⟧` as `⟦M01⟧` loses
+ * the formula even though it "kept placeholder 1".
+ *
  * @param text - translated text.
- * @returns the set of `M<n>` numbers referenced.
+ * @returns one entry per occurrence, in order, duplicates included.
  */
-export function placeholderNumbers(text: string): Set<number> {
-  const found = new Set<number>();
-  const pattern = /⟦M(\d+)⟧/g;
+export function placeholderTokens(text: string): string[] {
+  const found: string[] = [];
+  const pattern = /⟦M\d+⟧/g;
   let match = pattern.exec(text);
   while (match) {
-    found.add(Number(match[1]));
+    found.push(match[0]);
     match = pattern.exec(text);
   }
   return found;
@@ -97,23 +101,19 @@ export function placeholderNumbers(text: string): Set<number> {
 /**
  * Check that a model reply preserved every placeholder of its source segment.
  *
- * Models occasionally invent extra placeholders or drop one; both break the
- * formula re-insertion step, so the caller re-requests the affected segments.
+ * Compared as a multiset: a dropped, duplicated, renumbered or re-spaced token
+ * all have to be re-requested, because each one either loses a formula or draws
+ * placeholder text into the translated column.
  *
  * @param source - the segment text that was sent.
  * @param translated - the model's translation.
- * @returns true when the placeholder sets match exactly.
+ * @returns true when the placeholder multisets match exactly.
  */
 export function placeholdersIntact(source: string, translated: string): boolean {
-  const before = placeholderNumbers(source);
-  const after = placeholderNumbers(translated);
-  if (before.size !== after.size) {
+  const before = placeholderTokens(source).sort();
+  const after = placeholderTokens(translated).sort();
+  if (before.length !== after.length) {
     return false;
   }
-  for (const value of before) {
-    if (!after.has(value)) {
-      return false;
-    }
-  }
-  return true;
+  return before.every((token, index) => token === after[index]);
 }

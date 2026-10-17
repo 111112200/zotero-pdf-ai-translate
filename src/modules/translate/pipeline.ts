@@ -206,6 +206,11 @@ export async function translateUnits(
           `translating page ${unit.pageIndex + 1} (batch ${batchIndex + 1}/${batches.length}, attempt ${attempt})`,
         );
       }
+      // Each request is numbered from zero, including a retry that only carries
+      // the outstanding segments. Sending a retry with the original, now
+      // non-contiguous indices asked the model to renumber a 0..n-1 list into
+      // gaps, and every paragraph that did so exhausted the retries.
+      const asked = outstanding;
       try {
         const reply = await complete({
           profile,
@@ -213,7 +218,7 @@ export async function translateUnits(
             { role: "system", content: system },
             {
               role: "user",
-              content: userPrompt(outstanding.map((index) => segments[index])),
+              content: userPrompt(asked.map((index, position) => ({ i: position, t: segments[index].t }))),
             },
           ],
           jsonMode: true,
@@ -225,14 +230,17 @@ export async function translateUnits(
         }
         const parsed = parseSegments(reply.content);
         const stillMissing: number[] = [];
-        for (const index of outstanding) {
+        for (const [position, index] of asked.entries()) {
           const unit = batch[index];
-          const text = parsed.get(index);
+          const text = parsed.get(position);
           if (text === undefined) {
             stillMissing.push(index);
             continue;
           }
-          if (unit.mathCount > 0 && !placeholdersIntact(unit.source, text)) {
+          // Checked for every segment, not only the ones that carry a formula:
+          // a hallucinated token in formula-free prose is matched by nothing at
+          // render time and would be typeset as literal characters.
+          if (!placeholdersIntact(unit.source, text)) {
             stillMissing.push(index);
             continue;
           }

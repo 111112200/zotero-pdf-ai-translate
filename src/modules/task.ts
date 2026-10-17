@@ -175,15 +175,37 @@ async function run(
   if (failed) {
     notes.push(`${failed} paragraph(s) kept their original text`);
   }
+  if (rendered.unchangedParagraphs) {
+    notes.push(`${rendered.unchangedParagraphs} paragraph(s) came back unchanged and stay in the source language`);
+  }
   if (rendered.overflowBoxes) {
     notes.push(`${rendered.overflowBoxes} paragraph(s) did not fit their original box`);
   }
   if (rendered.preservedMathParagraphs) {
     notes.push(`${rendered.preservedMathParagraphs} paragraph(s) kept their original text because a math font could not be decoded`);
   }
+  if (rendered.placeholderMismatches) {
+    notes.push(`${rendered.placeholderMismatches} paragraph(s) kept their original text because the reply altered a formula placeholder`);
+  }
+  if (rendered.renderErrors) {
+    notes.push(`${rendered.renderErrors} paragraph(s) could not be typeset and kept their original text`);
+  }
   if (rendered.missingGlyphs.length) {
     notes.push(
       `the font cannot render: ${rendered.missingGlyphs.slice(0, 20).join("")}`,
+    );
+  }
+  if (rendered.skippedPages.length) {
+    notes.push(
+      `page(s) left in the original language: ${rendered.skippedPages.map((page) => page + 1).join(", ")}`,
+    );
+  }
+  const firstPage = getPref<number>("firstPage") || 0;
+  const lastPage = getPref<number>("lastPage") || 0;
+  if (firstPage > 1 || lastPage > 0) {
+    notes.push(
+      `only the pages in the configured range were exported (page ${firstPage || 1}` +
+        `${lastPage ? `–${lastPage}` : " to the end"})`,
     );
   }
 

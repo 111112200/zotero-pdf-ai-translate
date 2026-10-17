@@ -379,17 +379,42 @@ function assignColumn(line: TextLine, gutter: number | null): TextLine[] {
   return [{ ...line, column: -1 }];
 }
 
+/** A run that ends in something a space may follow. */
+const WORD_END = /[\p{L}\p{N}]$/u;
+/** A run that starts with something a space may precede. */
+const WORD_START = /^[\p{L}\p{N}]/u;
+
+/**
+ * Whether a space belongs between two horizontally adjacent runs.
+ *
+ * Two signals are needed. A gap wider than a word space is one. The other is
+ * pdf.js's habit of dropping a trailing space from `str` while leaving its
+ * advance in `width`: "The return " followed by an inline formula then measures
+ * as a slight *overlap*, so gap width alone joins the word to the formula. Only
+ * word characters are joined that way, which keeps `(α)` tight.
+ *
+ * @param previous - the run on the left.
+ * @param next - the run on the right.
+ * @returns true when the two runs need a space between them.
+ */
+export function needsSpace(previous: TextRun, next: TextRun): boolean {
+  if (/^\s/.test(next.text) || /\s$/.test(previous.text)) {
+    return false;
+  }
+  const gap = next.x - (previous.x + previous.width);
+  if (gap > Math.max(1, Math.max(previous.fontSize, next.fontSize) * 0.22)) {
+    return true;
+  }
+  return gap <= 0.5 && WORD_END.test(previous.text) && WORD_START.test(next.text);
+}
+
 /** Join runs into one string, inserting a space where pdf.js dropped one. */
 function joinRuns(runs: TextRun[]): string {
   let text = "";
   let previous: TextRun | undefined;
   for (const run of runs) {
-    if (previous) {
-      const gap = run.x - (previous.x + previous.width);
-      const spaceWidth = Math.max(1, run.fontSize * 0.22);
-      if (gap > spaceWidth && !/\s$/.test(text) && !/^\s/.test(run.text)) {
-        text += " ";
-      }
+    if (previous && needsSpace(previous, run)) {
+      text += " ";
     }
     text += run.text;
     previous = run;

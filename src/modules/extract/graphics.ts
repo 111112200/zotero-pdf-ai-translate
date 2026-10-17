@@ -1,6 +1,6 @@
 /** Graphic placements and ruled tables protected from translation and whiteout. */
 import type { PageGeometry } from './geometry';
-import type { Box, TextRun } from './types';
+import type { Box, ShadedRegion, TextRun } from './types';
 type Matrix = [
     number,
     number,
@@ -111,6 +111,119 @@ export function graphicRegions(list: Operators, ops: Record<string, number>, geo
 /** True when a text run intersects a protected graphic placement. */
 export function insideGraphic(run: TextRun, regions: Box[]): boolean {
     return regions.some(b => run.x < b.right && run.x + run.width > b.left && run.y + run.height > b.top && run.y < b.bottom);
+}
+
+/**
+ * Read a pdf.js colour operand as 0..1 RGB.
+ *
+ * pdf.js hands these back as a typed array of 0..255 components (the `args` entry
+ * *is* the array), while older builds and some operators use a plain float list,
+ * so both shapes and both ranges are accepted.
+ *
+ * @param args - the operator's arguments.
+ * @param channels - number of components the operator takes.
+ * @returns components in 0..1, or `undefined` when the shape is unexpected.
+ */
+function readColor(args: unknown, channels: number): number[] | undefined {
+    if (!Array.isArray(args) && !ArrayBuffer.isView(args)) {
+        return undefined;
+    }
+    const outer = args as ArrayLike<unknown>;
+    const first = outer[0];
+    const raw = (Array.isArray(first) || ArrayBuffer.isView(first) ? first : args) as ArrayLike<number>;
+    if (raw.length < channels) {
+        return undefined;
+    }
+    const values = Array.from({ length: channels }, (_, index) => Number(raw[index]));
+    if (!values.every(Number.isFinite)) {
+        return undefined;
+    }
+    const scale = values.some(value => value > 1) ? 255 : 1;
+    return values.map(value => Math.min(1, Math.max(0, value / scale)));
+}
+
+/**
+ * Non-white filled areas of a page, with their fill colour.
+ *
+ * The renderer covers original text with a filled rectangle. Painting it white
+ * is only correct on a white page: over a tinted background, a shaded table row
+ * or a coloured band, a white cover shows up as a patch. Recording the fills
+ * lets each cover take the colour of whatever it is covering.
+ *
+ * @param list - the page's operator list.
+ * @param ops - pdf.js `OPS`.
+ * @param geometry - page geometry, for coordinate normalization.
+ * @returns filled regions whose colour is not white, largest first.
+ */
+export function filledBackgrounds(list: Operators, ops: Record<string, number>, geometry: PageGeometry): ShadedRegion[] {
+    let matrix: Matrix = [1, 0, 0, 1, 0, 0];
+    const matrixStack: Matrix[] = [];
+    let fill: [number, number, number] = [1, 1, 1];
+    const fillStack: Array<[number, number, number]> = [];
+    let pending: Box | undefined;
+    const regions: ShadedRegion[] = [];
+
+    const clamp = (box: Box): Box => ({
+        left: Math.max(0, box.left),
+        right: Math.min(geometry.width, box.right),
+        top: Math.max(0, box.top),
+        bottom: Math.min(geometry.height, box.bottom),
+    });
+
+    const space = (bounds: number[]): Box => {
+        const points = [[bounds[0], bounds[1]], [bounds[2], bounds[1]], [bounds[0], bounds[3]], [bounds[2], bounds[3]]]
+            .map(([x, y]) => geometry.toNormalized(matrix[0] * x + matrix[2] * y + matrix[4], matrix[1] * x + matrix[3] * y + matrix[5]));
+        return clamp({
+            left: Math.min(...points.map(p => p.x)),
+            right: Math.max(...points.map(p => p.x)),
+            top: Math.min(...points.map(p => p.y)),
+            bottom: Math.max(...points.map(p => p.y)),
+        });
+    };
+
+    const fillOps = new Set([ops.fill, ops.eoFill, ops.fillStroke, ops.eoFillStroke, ops.closeFillStroke, ops.closeEOFillStroke]
+        .filter((value): value is number => typeof value === "number"));
+
+    for (let i = 0; i < list.fnArray.length; i++) {
+        const fn = list.fnArray[i], args = list.argsArray[i];
+        if (fn === ops.save) {
+            matrixStack.push([...matrix]);
+            fillStack.push([...fill]);
+        } else if (fn === ops.restore) {
+            matrix = matrixStack.pop() ?? matrix;
+            fill = fillStack.pop() ?? fill;
+        } else if (fn === ops.transform) {
+            matrix = multiply(matrix, args as Matrix);
+        } else if (fn === ops.setFillRGBColor) {
+            const color = readColor(args, 3);
+            if (color) fill = [color[0], color[1], color[2]];
+        } else if (fn === ops.setFillGray) {
+            const color = readColor(args, 1);
+            if (color) fill = [color[0], color[0], color[0]];
+        } else if (fn === ops.setFillCMYKColor) {
+            const color = readColor(args, 4);
+            if (color) {
+                const [c, m, y, k] = color;
+                fill = [(1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k)];
+            }
+        } else if (fn === ops.constructPath) {
+            const bounds = args[2] as number[] | undefined;
+            pending = bounds?.length === 4 && bounds.every(Number.isFinite) ? space(bounds) : undefined;
+        } else if (fillOps.has(fn)) {
+            if (pending && pending.right > pending.left && pending.bottom > pending.top && !isWhiteFill(fill)) {
+                regions.push({ box: pending, color: [...fill] as [number, number, number] });
+            }
+            pending = undefined;
+        } else if (fn === ops.endPath) {
+            pending = undefined;
+        }
+    }
+    return regions.sort((a, b) => (b.box.right - b.box.left) * (b.box.bottom - b.box.top) - (a.box.right - a.box.left) * (a.box.bottom - a.box.top));
+}
+
+/** True when a fill colour is close enough to white to be the default page. */
+function isWhiteFill(color: [number, number, number]): boolean {
+    return color.every(value => value >= 0.99);
 }
 /** True when two boxes overlap or are separated by at most the given distance. */
 export function touches(a: Box, b: Box, gap = 0): boolean {
