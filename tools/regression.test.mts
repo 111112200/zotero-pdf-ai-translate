@@ -625,3 +625,121 @@ test('a page box whose origin is not zero keeps the translation on the original'
         }
     } finally { await parsed.destroy(); }
 });
+
+test('a run where every request fails names the cause instead of exporting the original twice', async () => {
+    const { translateUnits } = await import('../src/modules/translate/pipeline.ts');
+    const { nothingTranslated } = await import('../src/modules/task.ts');
+    const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> }).Zotero;
+    const prefs = zotero.Prefs as { get: (name: string, scope?: boolean) => unknown };
+    const previousGet = prefs.get;
+    const previousHttp = zotero.HTTP;
+    prefs.get = (name: string) => (name.endsWith('cacheEnabled') ? false : undefined);
+
+    // An endpoint that is down: the request throws, every retry throws, and the
+    // pipeline falls back to the source text for the whole document. Before the
+    // guard, that run wrote a bilingual PDF whose right half was the original
+    // page and reported only a paragraph count.
+    zotero.HTTP = {
+        request: async () => {
+            throw new Error('Could not reach http://127.0.0.1:1/v1/chat/completions: network error');
+        },
+    };
+
+    const failures: string[] = [];
+    try {
+        const units = [0, 1].map(index => ({ pageIndex: 0, paragraphIndex: index, source: `Segment ${index}`, mathCount: 0 }));
+        const results = await translateUnits(units, {
+            profile: { id: 'test', preset: 'custom', label: 'test', baseURL: 'http://127.0.0.1:1/v1', apiKey: '', model: 'test' },
+            targetLang: 'zh-CN',
+            sourceLang: 'auto',
+            systemPromptExtra: '',
+            onBatchFailure: message => { if (!failures.includes(message)) failures.push(message); },
+        });
+        assert.equal(results.filter(result => result.failed).length, 2, 'every unit should be flagged as untranslated');
+        assert.equal(failures.length, 1, `one batch failed, one reason expected, saw ${JSON.stringify(failures)}`);
+        assert.match(failures[0], /Could not reach/);
+
+        const message = nothingTranslated(results, failures);
+        assert.ok(message, 'a run that translated nothing must be refused');
+        assert.match(message, /None of the 2 paragraph/);
+        assert.match(message, /Could not reach/, 'the endpoint error must reach the user, not just the log');
+
+        // A partial run is allowed through: only a total loss blocks the export.
+        assert.equal(nothingTranslated([{ pageIndex: 0, paragraphIndex: 0, translated: '译', failed: false }], []), undefined);
+        assert.equal(nothingTranslated([], []), undefined);
+    } finally {
+        prefs.get = previousGet;
+        zotero.HTTP = previousHttp;
+    }
+});
+
+test('translations are requested again on every run unless caching is opted into', async () => {
+    const { translateUnits } = await import('../src/modules/translate/pipeline.ts');
+    const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> }).Zotero;
+    const previousGet = (zotero.Prefs as { get: unknown }).get;
+    const previousHttp = zotero.HTTP;
+    // The harness leaves cacheEnabled unset, exactly like a fresh install before
+    // the default reaches the profile. That must mean "ask again", not "reuse".
+    (zotero.Prefs as { get: unknown }).get = () => undefined;
+
+    let requests = 0;
+    zotero.HTTP = {
+        request: async (_method: string, _url: string, options: { body: string }) => {
+            const payload = JSON.parse(options.body) as { messages: Array<{ content: string }> };
+            const segments = (JSON.parse(payload.messages[1].content) as { segments: Array<{ i: number; t: string }> }).segments;
+            requests += 1;
+            const content = JSON.stringify({ segments: segments.map(s => ({ i: s.i, t: `第${requests}次:${s.t}` })) });
+            return { status: 200, response: JSON.stringify({ choices: [{ message: { content } }] }) };
+        },
+    };
+
+    const options = {
+        profile: { id: 'test', preset: 'custom', label: 'test', baseURL: 'http://127.0.0.1:1/v1', apiKey: '', model: 'test' },
+        targetLang: 'zh-CN',
+        sourceLang: 'auto',
+        systemPromptExtra: '',
+    };
+    try {
+        const units = [{ pageIndex: 0, paragraphIndex: 0, source: 'Segment 0', mathCount: 0 }];
+        const first = await translateUnits(units, options);
+        const second = await translateUnits(units, options);
+        assert.equal(requests, 2, 'the second run must hit the service again, not the cache');
+        assert.match(first[0].translated, /第1次/);
+        assert.match(second[0].translated, /第2次/, 'the second run returned a stale cached translation');
+    } finally {
+        (zotero.Prefs as { get: unknown }).get = previousGet;
+        zotero.HTTP = previousHttp;
+    }
+});
+
+test('a render that replaced nothing on any page is refused, and reports why', async () => {
+    const { nothingRendered } = await import('../src/modules/task.ts');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.TimesRoman);
+    const pages = [doc.addPage([400, 600]), doc.addPage([400, 600])];
+    for (const page of pages) page.drawText('Original English sentence.', { x: 40, y: 500, size: 11, font });
+    const bytes = new Uint8Array(await doc.save());
+    const extracted = await extractPages(bytes);
+
+    // Every reply echoed the source: the renderer counts them as unchanged and
+    // leaves the page in English, so the export must not be written.
+    const echoed = await renderBilingual({
+        sourceBytes: bytes,
+        pages: extracted,
+        translations: new Map(extracted.flatMap(page => page.paragraphs.map((p, i): [string, string] => [`${page.index}:${i}`, p.source]))),
+        debug: true,
+    });
+    assert.equal(echoed.unchangedParagraphs, extracted.reduce((sum, page) => sum + page.paragraphs.length, 0));
+    const message = nothingRendered(echoed, extracted);
+    assert.ok(message, 'a bilingual PDF that is the original twice must be refused');
+    assert.match(message, /came back unchanged/);
+
+    // One translated page is enough to keep exporting.
+    const partial = await renderBilingual({
+        sourceBytes: bytes,
+        pages: extracted,
+        translations: new Map([['0:0', '译文。']]),
+        debug: true,
+    });
+    assert.equal(nothingRendered(partial, extracted), undefined);
+});

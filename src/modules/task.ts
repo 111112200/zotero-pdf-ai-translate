@@ -16,8 +16,12 @@ import {
   uniquePath,
   writePdf,
 } from "./output/paths";
-import { renderBilingual } from "./render/bilingual";
-import { translateUnits, type TranslationUnit } from "./translate/pipeline";
+import { renderBilingual, type RenderResult } from "./render/bilingual";
+import {
+  translateUnits,
+  type TranslationResult,
+  type TranslationUnit,
+} from "./translate/pipeline";
 import { resolveActiveProfile } from "./translate/profile";
 
 export interface TaskHandle {
@@ -89,6 +93,81 @@ export async function startTranslation(
   }
 }
 
+/**
+ * Explain why a run translated nothing, or `undefined` when at least one
+ * paragraph made it through.
+ *
+ * A run in which every request fails still returns a full set of results, each
+ * flagged `failed` and carrying its source text. Exporting that produces a file
+ * whose right half is the original page printed twice: the reader sees no
+ * Chinese, no error, and an ordinary-looking PDF, which is exactly the failure
+ * mode this guard exists to stop.
+ *
+ * @param results - one result per unit, as returned by `translateUnits`.
+ * @param failures - reasons reported per failed batch, in arrival order.
+ * @returns a message naming the most likely cause, or `undefined`.
+ */
+export function nothingTranslated(
+  results: TranslationResult[],
+  failures: string[],
+): string | undefined {
+  if (!results.length || results.some((result) => !result.failed)) {
+    return undefined;
+  }
+  const reasons = failures.slice(0, 3).map((reason) => `- ${reason}`);
+  return [
+    `None of the ${results.length} paragraph(s) could be translated, so nothing was written.`,
+    "Check the API key, the base URL and the model name in the settings, and any proxy this machine needs.",
+    ...(reasons.length ? ["", "The service said:", ...reasons] : []),
+  ].join("\n");
+}
+
+/**
+ * Explain why the composed document carries no translation, or `undefined` when
+ * at least one page does.
+ *
+ * The translation can succeed while every page is still left in the source
+ * language: a model that echoes its input, a box the translation cannot be made
+ * to fit, or a formula font that cannot be decoded. Each of those is reported by
+ * the renderer, but only the totals show that *nothing* was replaced.
+ *
+ * @param rendered - outcome of the render pass.
+ * @param pages - the extracted pages that were rendered.
+ * @returns a message naming the counts, or `undefined`.
+ */
+export function nothingRendered(
+  rendered: RenderResult,
+  pages: PageContent[],
+): string | undefined {
+  const withText = new Set(
+    pages
+      .filter((page) => page.paragraphs.some((paragraph) => !paragraph.isFormulaBlock))
+      .map((page) => page.index),
+  );
+  if (!withText.size) {
+    return undefined;
+  }
+  const translated = [...withText].filter((index) => !rendered.skippedPages.includes(index));
+  if (translated.length) {
+    return undefined;
+  }
+  const counts = [
+    [rendered.unchangedParagraphs, "came back unchanged, in the source language"],
+    [rendered.preservedMathParagraphs, "kept their text because a math font could not be decoded"],
+    [rendered.placeholderMismatches, "kept their text because the reply altered a formula placeholder"],
+    [rendered.overflowBoxes, "did not fit their original box"],
+    [rendered.renderErrors, "could not be typeset"],
+  ]
+    .filter(([count]) => count)
+    .map(([count, reason]) => `- ${count} paragraph(s) ${reason}`);
+  return [
+    `Every page would have kept its original text, so nothing was written.`,
+    "The translation never reached the page: check that the target language is not the source language",
+    "and that the model is answering with translations rather than an echo of the input.",
+    ...(counts.length ? ["", ...counts] : []),
+  ].join("\n");
+}
+
 /** The actual pipeline, separated so cleanup always runs. */
 async function run(
   attachment: Zotero.Item,
@@ -124,12 +203,18 @@ async function run(
   );
 
   progress?.addDescription(`Translating with ${profile.model}…`);
+  const failures: string[] = [];
   const results = await translateUnits(units, {
     profile,
     targetLang,
     sourceLang,
     systemPromptExtra: getPref<string>("systemPromptExtra") || "",
     signal: controller.signal,
+    onBatchFailure: (message) => {
+      if (!failures.includes(message)) {
+        failures.push(message);
+      }
+    },
     onProgress: (report) => {
       progress?.changeHeadline(
         `Translating ${report.done}/${report.total}${report.tokens ? ` · ${report.tokens} tokens` : ""}`,
@@ -142,6 +227,13 @@ async function run(
     progress?.addDescription("Nothing was written.");
     progress?.close();
     throw new Error("Translation cancelled.");
+  }
+
+  const untranslatedRun = nothingTranslated(results, failures);
+  if (untranslatedRun) {
+    progress?.changeHeadline("Translation failed");
+    progress?.addDescription("Nothing was written.");
+    throw new Error(untranslatedRun);
   }
 
   const failed = results.filter((result) => result.failed).length;
@@ -166,6 +258,13 @@ async function run(
   });
 
   if (handle.cancelled) throw new Error("Translation cancelled.");
+
+  const unchangedRun = nothingRendered(rendered, pages);
+  if (unchangedRun) {
+    progress?.changeHeadline("Nothing was translated");
+    progress?.addDescription("Nothing was written.");
+    throw new Error(unchangedRun);
+  }
 
   const target = resolveOutput(attachment, sourcePath);
   const finalPath = await uniquePath(target.path, getPref<boolean>("overwrite"));

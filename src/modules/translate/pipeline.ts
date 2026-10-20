@@ -54,6 +54,17 @@ export interface TranslateOptions {
   systemPromptExtra: string;
   onProgress?: (report: ProgressReport) => void;
   signal?: AbortSignal;
+  /**
+   * Called once per batch that finished without a single usable segment, with
+   * the reason it gave up.
+   *
+   * A run where every batch fails still returns one result per unit, all marked
+   * `failed`, so the caller sees a complete-looking result set. Without this
+   * callback the only trace of a dead endpoint or a rejected API key is a count
+   * of untranslated paragraphs, and the export goes ahead and writes the
+   * original page twice.
+   */
+  onBatchFailure?: (message: string) => void;
 }
 
 /** Run `worker` over `items` with at most `limit` in flight. */
@@ -138,6 +149,23 @@ function stripCodeFence(raw: string): string {
 }
 
 /**
+ * Explain why a batch ended with no translated segment.
+ *
+ * @param lastError - the last exception the batch raised, if any.
+ * @param replies - replies that arrived and parsed for this batch.
+ * @returns one short, user-facing sentence.
+ */
+function describeBatchFailure(lastError: unknown, replies: number): string {
+  if (lastError) {
+    return lastError instanceof Error ? lastError.message : String(lastError);
+  }
+  if (replies) {
+    return "The service replied, but the reply contained none of the requested segments.";
+  }
+  return "The request could not be completed.";
+}
+
+/**
  * Translate every unit, with retries and caching.
  *
  * @param units - paragraphs to translate.
@@ -148,7 +176,8 @@ export async function translateUnits(
   units: TranslationUnit[],
   options: TranslateOptions,
 ): Promise<TranslationResult[]> {
-  const { profile, targetLang, sourceLang, systemPromptExtra, onProgress, signal } = options;
+  const { profile, targetLang, sourceLang, systemPromptExtra, onProgress, signal, onBatchFailure } =
+    options;
   const cache = new TranslationCache(profile, targetLang, systemPromptExtra);
   await cache.load();
 
@@ -197,6 +226,10 @@ export async function translateUnits(
     const segments: Segment[] = batch.map((unit, index) => ({ i: index, t: unit.source }));
     let outstanding = batch.map((_, index) => index);
     let attempt = 0;
+    /** Last failure of this batch, kept so a batch that translated nothing can explain itself. */
+    let lastError: unknown;
+    /** Replies that arrived and parsed, to tell a broken endpoint from a broken reply. */
+    let replies = 0;
 
     while (outstanding.length && attempt < maxRetries && !signal?.aborted) {
       attempt++;
@@ -228,6 +261,7 @@ export async function translateUnits(
         if (reply.usage?.totalTokens) {
           tokens += reply.usage.totalTokens;
         }
+        replies++;
         const parsed = parseSegments(reply.content);
         const stillMissing: number[] = [];
         for (const [position, index] of asked.entries()) {
@@ -258,6 +292,7 @@ export async function translateUnits(
         if (signal?.aborted) {
           return;
         }
+        lastError = error;
         const retryable =
           error instanceof ApiError ? error.status === 429 || error.status >= 500 : true;
         if (!retryable || attempt >= maxRetries) {
@@ -266,6 +301,13 @@ export async function translateUnits(
         }
         await delay(500 * 2 ** (attempt - 1));
       }
+    }
+
+    // A batch that produced nothing at all is worth reporting by reason: with
+    // one dead endpoint every batch lands here, and "472 paragraph(s) kept their
+    // original text" is not something a reader can act on.
+    if (outstanding.length === batch.length) {
+      onBatchFailure?.(describeBatchFailure(lastError, replies));
     }
 
     // Anything still unresolved keeps its source text and is flagged, so the

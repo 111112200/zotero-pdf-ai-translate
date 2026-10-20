@@ -47,5 +47,8 @@ pref("cjkFontPath", "");
 pref("fallbackFontPath", "");
 
 // --- Misc ------------------------------------------------------------------
-pref("cacheEnabled", true);
+// Off by default: every run asks the service again, so a reply that echoed the
+// source or came from a half-broken endpoint is never frozen into the next
+// export. Turn this on deliberately to stop paying for the same paragraphs.
+pref("cacheEnabled", false);
 pref("debug", false);

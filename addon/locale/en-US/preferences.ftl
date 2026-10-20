@@ -24,7 +24,7 @@ pdfaitranslate-pref-open = Open it when finished
 pdfaitranslate-pref-advanced = Advanced
 pdfaitranslate-pref-concurrency = Parallel requests
 pdfaitranslate-pref-skipformulas = Preserve original formula typesetting on both sides
-pdfaitranslate-pref-cache = Cache translations (re-translating the same text is free)
+pdfaitranslate-pref-cache = Cache translations (off by default; every run asks the service again)
 pdfaitranslate-pref-debug = Write debug logs
 pdfaitranslate-pref-help =
     PDF AI Translate { $version } built { $time }.

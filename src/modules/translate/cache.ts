@@ -1,13 +1,15 @@
 /**
  * Translation cache.
  *
- * Re-running a translation after a crash, a settings change or a partial
- * failure must not re-pay for text that was already translated. Entries are
- * keyed by the source text together with everything that changes the answer:
- * model, base URL, target language and prompt.
+ * Off unless the user turns it on in the settings. Retranslating is the safer
+ * default: a cached reply is invisible, so a paragraph a model echoed back, or
+ * one produced while the endpoint was half-broken, would otherwise be frozen
+ * into every later export of that paper without a single request to notice it.
  *
- * The store is a JSON file in the Zotero data directory because plugin
- * preferences are a poor fit for tens of thousands of entries.
+ * When enabled, entries are keyed by the source text together with everything
+ * that changes the answer: model, base URL, target language and prompt. The
+ * store is a JSON file in the Zotero data directory because plugin preferences
+ * are a poor fit for tens of thousands of entries.
  */
 
 import type { ProviderProfile } from "../../utils/prefs";
@@ -47,7 +49,9 @@ export class TranslationCache {
   private readonly enabled: boolean;
 
   constructor(profile: ProviderProfile, targetLang: string, promptExtra: string) {
-    this.enabled = getPref<boolean>("cacheEnabled") !== false;
+    // Only an explicit opt-in enables it: an unset preference, a profile that
+    // predates the key, or a failed read all mean "retranslate".
+    this.enabled = getPref<boolean>("cacheEnabled") === true;
     this.namespace = hash128(
       [PROMPT_VERSION, profile.baseURL, profile.model, targetLang, promptExtra].join("\u0000"),
     );

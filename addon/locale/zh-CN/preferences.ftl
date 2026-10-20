@@ -24,7 +24,7 @@ pdfaitranslate-pref-open = 完成后自动打开
 pdfaitranslate-pref-advanced = 高级
 pdfaitranslate-pref-concurrency = 并发请求数
 pdfaitranslate-pref-skipformulas = 跳过公式（两侧保留原始公式排版）
-pdfaitranslate-pref-cache = 启用译文缓存（重复翻译同一段不重复计费）
+pdfaitranslate-pref-cache = 启用译文缓存（默认关闭；关闭时每次都重新请求译文）
 pdfaitranslate-pref-debug = 输出调试日志
 pdfaitranslate-pref-help =
     PDF AI 翻译 { $version }，构建于 { $time }。
