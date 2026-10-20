@@ -743,3 +743,169 @@ test('a render that replaced nothing on any page is refused, and reports why', a
     });
     assert.equal(nothingRendered(partial, extracted), undefined);
 });
+
+test('the quality audit names truncation, unbalanced brackets and untranslated replies', async () => {
+    const { auditTranslation } = await import('../src/modules/translate/quality.ts');
+    const long = 'This paragraph has plenty of words so a truncated translation stands out clearly to any reader who compares them.';
+    const complete = '这一段译文完整，覆盖了整段内容，并且以句号结尾，长度和原文相比也合理，不会被判断成截断。';
+    assert.deepEqual(auditTranslation(long, complete, 'zh-CN'), [], 'a sound translation must not be flagged');
+
+    const truncated = auditTranslation(long, '只有一点点', 'zh-CN').map(issue => issue.code);
+    assert.ok(truncated.includes('truncated'), `expected truncation, saw ${truncated}`);
+
+    const bracket = auditTranslation('See (Figure 3).', '见（图 3。', 'zh-CN').map(issue => issue.code);
+    assert.ok(bracket.includes('unbalanced'), `expected an unbalanced bracket, saw ${bracket}`);
+
+    const english = auditTranslation(long, 'This paragraph was left in English even though it is long enough to notice immediately.', 'zh-CN').map(issue => issue.code);
+    assert.ok(english.includes('not-translated'), `expected an untranslated reply, saw ${english}`);
+
+    // A Chinese target is required for the script and length rules; an English
+    // target of an English source must never be flagged for staying English.
+    assert.deepEqual(auditTranslation(long, 'A perfectly reasonable English rendering of the same sentence, about as long.', 'en'), []);
+    assert.deepEqual(auditTranslation(long, '', 'zh-CN').map(issue => issue.code), ['empty']);
+});
+
+test('a truncated reply is re-requested once with the problem named, and the repair is kept', async () => {
+    const { translateUnits } = await import('../src/modules/translate/pipeline.ts');
+    const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> }).Zotero;
+    const prefs = zotero.Prefs as { get: (name: string) => unknown };
+    const previousGet = prefs.get;
+    const previousHttp = zotero.HTTP;
+    prefs.get = (name: string) => (name.endsWith('cacheEnabled') ? false : undefined);
+
+    const systems: string[] = [];
+    let calls = 0;
+    zotero.HTTP = {
+        request: async (_method: string, _url: string, options: { body: string }) => {
+            const payload = JSON.parse(options.body) as { messages: Array<{ content: string }> };
+            const segments = (JSON.parse(payload.messages[1].content) as { segments: Array<{ i: number; t: string }> }).segments;
+            systems.push(payload.messages[0].content);
+            calls += 1;
+            // First reply stops after a few characters; the correction pass is complete.
+            const text = calls === 1
+                ? '只有开头'
+                : '这一段译文完整，覆盖了整段内容，并且以句号结尾，长度和原文相比也合理。';
+            return { status: 200, response: JSON.stringify({ choices: [{ message: { content: JSON.stringify({ segments: segments.map(segment => ({ i: segment.i, t: text })) }) } }] }) };
+        },
+    };
+
+    try {
+        const source = 'This paragraph has plenty of words so a truncated translation stands out clearly to any reader who compares them.';
+        const results = await translateUnits(
+            [{ pageIndex: 0, paragraphIndex: 0, source, mathCount: 0 }],
+            {
+                profile: { id: 'test', preset: 'custom', label: 'test', baseURL: 'http://127.0.0.1:1/v1', apiKey: '', model: 'test' },
+                targetLang: 'zh-CN',
+                sourceLang: 'auto',
+                systemPromptExtra: '',
+            },
+        );
+        assert.equal(calls, 2, 'a truncated paragraph must trigger exactly one repair request');
+        assert.match(systems[1], /Correction pass/, 'the repair request must name the problem');
+        assert.match(results[0].translated, /这一段译文完整/, 'the repaired reply must replace the truncated one');
+        assert.equal(results[0].quality, 'retried');
+    } finally {
+        prefs.get = previousGet;
+        zotero.HTTP = previousHttp;
+    }
+});
+
+test('only the glossary terms a batch mentions are sent with it', async () => {
+    const { translateUnits } = await import('../src/modules/translate/pipeline.ts');
+    const { parseGlossary, glossaryBlock } = await import('../src/modules/translate/glossary.ts');
+    const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> }).Zotero;
+    const prefs = zotero.Prefs as { get: (name: string) => unknown };
+    const previousGet = prefs.get;
+    const previousHttp = zotero.HTTP;
+    prefs.get = (name: string) => (name.endsWith('cacheEnabled') ? false : undefined);
+
+    const glossary = parseGlossary('row buffer,行缓冲区\nDRAM\t动态随机存取存储器\n# comment line\nno-separator-here\n');
+    assert.deepEqual(glossary.map(entry => entry.source), ['row buffer', 'DRAM'], 'malformed lines must be skipped');
+    // A term embedded in a longer word must not match.
+    const block = glossaryBlock(glossary, 'The row buffer conflicts are reduced.');
+    assert.match(block, /row buffer → 行缓冲区/);
+    assert.doesNotMatch(block, /DRAM/);
+    assert.equal(glossaryBlock(glossary, 'nothing relevant here'), '');
+    assert.equal(glossaryBlock(glossary, 'Rows are buffered elsewhere'), '');
+
+    const systems: string[] = [];
+    zotero.HTTP = {
+        request: async (_method: string, _url: string, options: { body: string }) => {
+            const payload = JSON.parse(options.body) as { messages: Array<{ content: string }> };
+            const segments = (JSON.parse(payload.messages[1].content) as { segments: Array<{ i: number; t: string }> }).segments;
+            systems.push(payload.messages[0].content);
+            const content = JSON.stringify({ segments: segments.map(segment => ({ i: segment.i, t: '行缓冲区的冲突减少了。' })) });
+            return { status: 200, response: JSON.stringify({ choices: [{ message: { content } }] }) };
+        },
+    };
+
+    try {
+        await translateUnits(
+            [{ pageIndex: 0, paragraphIndex: 0, source: 'The row buffer conflicts are reduced.', mathCount: 0 }],
+            {
+                profile: { id: 'test', preset: 'custom', label: 'test', baseURL: 'http://127.0.0.1:1/v1', apiKey: '', model: 'test' },
+                targetLang: 'zh-CN',
+                sourceLang: 'auto',
+                systemPromptExtra: '',
+                glossary,
+            },
+        );
+        assert.equal(systems.length, 1);
+        assert.match(systems[0], /Terminology\./);
+        assert.match(systems[0], /row buffer → 行缓冲区/);
+    } finally {
+        prefs.get = previousGet;
+        zotero.HTTP = previousHttp;
+    }
+});
+
+test('a resumed run reuses what was stored and persists what it translates', async () => {
+    const { translateUnits } = await import('../src/modules/translate/pipeline.ts');
+    const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> }).Zotero;
+    const prefs = zotero.Prefs as { get: (name: string) => unknown };
+    const previousGet = prefs.get;
+    const previousHttp = zotero.HTTP;
+    prefs.get = (name: string) => (name.endsWith('cacheEnabled') ? false : undefined);
+
+    const stored = new Map<string, string>([['0:0', '已经译好的第一段。']]);
+    let flushes = 0;
+    const store = {
+        get: (key: string) => stored.get(key),
+        set: (key: string, value: string) => { stored.set(key, value); },
+        flush: async () => { flushes += 1; },
+    };
+
+    const asked: string[][] = [];
+    zotero.HTTP = {
+        request: async (_method: string, _url: string, options: { body: string }) => {
+            const payload = JSON.parse(options.body) as { messages: Array<{ content: string }> };
+            const segments = (JSON.parse(payload.messages[1].content) as { segments: Array<{ i: number; t: string }> }).segments;
+            asked.push(segments.map(segment => segment.t));
+            const content = JSON.stringify({ segments: segments.map(segment => ({ i: segment.i, t: '第二段的译文。' })) });
+            return { status: 200, response: JSON.stringify({ choices: [{ message: { content } }] }) };
+        },
+    };
+
+    try {
+        const results = await translateUnits(
+            [
+                { pageIndex: 0, paragraphIndex: 0, source: 'First paragraph.', mathCount: 0 },
+                { pageIndex: 0, paragraphIndex: 1, source: 'Second paragraph.', mathCount: 0 },
+            ],
+            {
+                profile: { id: 'test', preset: 'custom', label: 'test', baseURL: 'http://127.0.0.1:1/v1', apiKey: '', model: 'test' },
+                targetLang: 'zh-CN',
+                sourceLang: 'auto',
+                systemPromptExtra: '',
+                resume: store,
+            },
+        );
+        assert.equal(results[0].translated, '已经译好的第一段。', 'the stored segment must be reused');
+        assert.deepEqual(asked, [['Second paragraph.']], 'only the missing segment may be requested');
+        assert.equal(stored.get('0:1'), '第二段的译文。', 'the new segment must reach the store');
+        assert.ok(flushes >= 1, 'the store must be flushed so a crash keeps the progress');
+    } finally {
+        prefs.get = previousGet;
+        zotero.HTTP = previousHttp;
+    }
+});

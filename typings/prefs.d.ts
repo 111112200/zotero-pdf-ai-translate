@@ -20,10 +20,11 @@ declare namespace _ZoteroTypes {
       "systemPromptExtra": string;
       "sourceLang": string;
       "targetLang": string;
-      "skipReferences": boolean;
       "firstPage": number;
       "lastPage": number;
-      "bilingualLayout": string;
+      "glossary": string;
+      "qualityAudit": boolean;
+      "resumePartial": boolean;
       "originalOnLeft": boolean;
       "columnGapPt": number;
       "drawDivider": boolean;
@@ -35,7 +36,6 @@ declare namespace _ZoteroTypes {
       "openAfterExport": boolean;
       "revealAfterExport": boolean;
       "cjkFontPath": string;
-      "fallbackFontPath": string;
       "cacheEnabled": boolean;
       "debug": boolean;
     };

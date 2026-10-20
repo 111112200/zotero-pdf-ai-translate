@@ -7,7 +7,7 @@
  */
 
 import { createTaskProgress, type TaskProgress } from "./ui/progress";
-import { getPref } from "../utils/prefs";
+import { getPref, type ProviderProfile } from "../utils/prefs";
 import { extractPages } from "./extract";
 import type { PageContent } from "./extract/types";
 import {
@@ -23,6 +23,9 @@ import {
   type TranslationUnit,
 } from "./translate/pipeline";
 import { resolveActiveProfile } from "./translate/profile";
+import { hash128 } from "./translate/cache";
+import { parseGlossary, glossarySignature } from "./translate/glossary";
+import { PartialRun } from "./translate/resume";
 
 export interface TaskHandle {
   cancelled: boolean;
@@ -168,6 +171,90 @@ export function nothingRendered(
   ].join("\n");
 }
 
+/**
+ * Ask whether to continue a run that was cancelled or crashed earlier.
+ *
+ * Nothing is resumed silently: a partial file from three days ago may belong to
+ * a different model, a different glossary or a document the user has since
+ * edited, and reusing it without asking is exactly the kind of invisible state
+ * that makes a translation tool untrustworthy.
+ *
+ * @param completed - segments the store already holds.
+ * @param total - segments this run would translate.
+ * @returns true when the user chose to continue.
+ */
+function confirmResume(completed: number, total: number): boolean {
+  const win = Zotero.getMainWindow();
+  if (!win) {
+    return false;
+  }
+  const message =
+    `An unfinished translation of this PDF was found on disk: ` +
+    `${completed} of ${total} paragraph(s) were already translated.\n\n` +
+    "Continue from there, or choose Cancel to translate everything again.";
+  try {
+    return Services.prompt.confirm(win as unknown as mozIDOMWindowProxy, `${addonName} · resume`, message);
+  } catch (error) {
+    ztoolkit.log("could not ask about the partial run", error);
+    return false;
+  }
+}
+
+/**
+ * Open the partial run for this document when the user wants it.
+ *
+ * The settings are folded into the store's namespace, so a change of model,
+ * target language, prompt or glossary starts a fresh run instead of mixing two
+ * answers into one file.
+ *
+ * @param sourcePath - absolute path of the PDF.
+ * @param options - settings that change the answer.
+ * @returns the store to hand to the pipeline, or `undefined`.
+ */
+async function openPartialRun(
+  sourcePath: string,
+  options: {
+    profile: ProviderProfile;
+    targetLang: string;
+    promptExtra: string;
+    glossarySignature: string;
+    total: number;
+  },
+): Promise<PartialRun | undefined> {
+  if (getPref<boolean>("resumePartial") === false) {
+    return undefined;
+  }
+  let stat: { size: number; lastModified: number };
+  try {
+    stat = (await IOUtils.stat(sourcePath)) as { size: number; lastModified: number };
+  } catch (error) {
+    ztoolkit.log("could not stat the PDF for a partial run", error);
+    return undefined;
+  }
+  const namespace = hash128(
+    [
+      options.profile.baseURL,
+      options.profile.model,
+      options.targetLang,
+      options.promptExtra,
+      options.glossarySignature,
+    ].join("\u0000"),
+  );
+  const partial = await PartialRun.open(
+    { path: sourcePath, size: stat.size, mtime: stat.lastModified },
+    namespace,
+  );
+  if (!partial) {
+    return undefined;
+  }
+  if (!confirmResume(partial.size, options.total)) {
+    await partial.clear();
+    return undefined;
+  }
+  progress?.addDescription(`Resuming: ${partial.size} paragraph(s) already translated.`);
+  return partial;
+}
+
 /** The actual pipeline, separated so cleanup always runs. */
 async function run(
   attachment: Zotero.Item,
@@ -203,12 +290,24 @@ async function run(
   );
 
   progress?.addDescription(`Translating with ${profile.model}…`);
+  const promptExtra = getPref<string>("systemPromptExtra") || "";
+  const glossary = parseGlossary(getPref<string>("glossary") || "");
+  const partial = await openPartialRun(sourcePath, {
+    profile,
+    targetLang,
+    promptExtra,
+    glossarySignature: glossarySignature(glossary),
+    total: units.length,
+  });
   const failures: string[] = [];
   const results = await translateUnits(units, {
     profile,
     targetLang,
     sourceLang,
-    systemPromptExtra: getPref<string>("systemPromptExtra") || "",
+    systemPromptExtra: promptExtra,
+    glossary,
+    resume: partial,
+    qualityAudit: getPref<boolean>("qualityAudit") !== false,
     signal: controller.signal,
     onBatchFailure: (message) => {
       if (!failures.includes(message)) {
@@ -269,10 +368,21 @@ async function run(
   const target = resolveOutput(attachment, sourcePath);
   const finalPath = await uniquePath(target.path, getPref<boolean>("overwrite"));
   await writePdf(finalPath, rendered.bytes);
+  // The document is out, so there is nothing left to resume. Keeping the file
+  // would only offer the next run translations it is about to pay for anyway.
+  await partial?.clear();
 
   const notes: string[] = [];
   if (failed) {
     notes.push(`${failed} paragraph(s) kept their original text`);
+  }
+  const repaired = results.filter((result) => result.quality === "retried").length;
+  const suspects = results.filter((result) => result.quality === "suspect").length;
+  if (repaired) {
+    notes.push(`${repaired} paragraph(s) looked truncated or untranslated and were re-requested`);
+  }
+  if (suspects) {
+    notes.push(`${suspects} paragraph(s) still look damaged after a second pass`);
   }
   if (rendered.unchangedParagraphs) {
     notes.push(`${rendered.unchangedParagraphs} paragraph(s) came back unchanged and stay in the source language`);

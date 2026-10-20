@@ -14,6 +14,9 @@ import { complete, ApiError } from "./client";
 import { placeholdersIntact, systemPrompt, userPrompt } from "./prompts";
 import type { Segment } from "./prompts";
 import { TranslationCache } from "./cache";
+import { glossaryBlock, type GlossaryEntry } from "./glossary";
+import { auditTranslation, correctionHints, type QualityIssue } from "./quality";
+import type { TranslationRunStore } from "./resume";
 
 /** One paragraph queued for translation. */
 export interface TranslationUnit {
@@ -34,6 +37,12 @@ export interface TranslationResult {
   translated: string;
   /** True when this unit fell back to its source text. */
   failed: boolean;
+  /**
+   * Set when the quality audit had something to say about this paragraph:
+   * `retried` means a second reply replaced the first, `suspect` means the
+   * second reply still looks wrong but was kept anyway.
+   */
+  quality?: "retried" | "suspect";
 }
 
 export interface ProgressReport {
@@ -65,6 +74,22 @@ export interface TranslateOptions {
    * original page twice.
    */
   onBatchFailure?: (message: string) => void;
+  /**
+   * Where finished segments are persisted between batches, so a cancelled or
+   * crashed run can be continued instead of paid for twice.
+   */
+  resume?: TranslationRunStore;
+  /**
+   * Terminology to honour. Only the entries a batch actually contains are sent,
+   * so a long list costs nothing on the segments that never mention them.
+   */
+  glossary?: GlossaryEntry[];
+  /**
+   * Re-request a paragraph whose reply looks truncated or was never translated.
+   * On by default: the audit is pure text comparison and costs one extra request
+   * per damaged segment, not per document.
+   */
+  qualityAudit?: boolean;
 }
 
 /** Run `worker` over `items` with at most `limit` in flight. */
@@ -176,8 +201,18 @@ export async function translateUnits(
   units: TranslationUnit[],
   options: TranslateOptions,
 ): Promise<TranslationResult[]> {
-  const { profile, targetLang, sourceLang, systemPromptExtra, onProgress, signal, onBatchFailure } =
-    options;
+  const {
+    profile,
+    targetLang,
+    sourceLang,
+    systemPromptExtra,
+    onProgress,
+    signal,
+    onBatchFailure,
+    resume,
+    glossary = [],
+    qualityAudit = true,
+  } = options;
   const cache = new TranslationCache(profile, targetLang, systemPromptExtra);
   await cache.load();
 
@@ -187,11 +222,16 @@ export async function translateUnits(
 
   let tokens = 0;
   let done = 0;
+  /** Paragraphs a resumed run already had, for the progress label. */
+  let restored = 0;
   const report = (stage: string) =>
     onProgress?.({ done, total: units.length, stage, tokens });
 
   for (const unit of units) {
-    const hit = cache.get(unit.source);
+    // The cache is a cross-run convenience the user opts into; the resume store
+    // belongs to one interrupted run and comes second, so an enabled cache still
+    // wins over a partial file.
+    const hit = cache.get(unit.source) ?? resume?.get(key(unit));
     if (hit !== undefined) {
       results.set(key(unit), {
         pageIndex: unit.pageIndex,
@@ -199,12 +239,19 @@ export async function translateUnits(
         translated: hit,
         failed: false,
       });
+      if (cache.get(unit.source) === undefined) {
+        restored++;
+      }
       done++;
     } else {
       pending.push(unit);
     }
   }
-  report(`cache: ${done} of ${units.length}`);
+  report(
+    restored
+      ? `cache: ${done - restored} cached, ${restored} resumed of ${units.length}`
+      : `cache: ${done} of ${units.length}`,
+  );
 
   const budget = getPref<number>("batchChars") || 1800;
   const batches = makeBatches(pending, budget);
@@ -212,7 +259,7 @@ export async function translateUnits(
   const maxRetries = Math.max(1, getPref<number>("maxRetries") ?? 3);
   const timeoutMs = Math.max(15, getPref<number>("requestTimeoutSec") ?? 120) * 1000;
 
-  const system = systemPrompt(targetLang, [
+  const baseSystem = systemPrompt(targetLang, [
     systemPromptExtra,
     sourceLang && sourceLang !== "auto" ? `The source language is ${sourceLang}.` : "",
   ]
@@ -226,10 +273,16 @@ export async function translateUnits(
     const segments: Segment[] = batch.map((unit, index) => ({ i: index, t: unit.source }));
     let outstanding = batch.map((_, index) => index);
     let attempt = 0;
+    /** Indices of this batch that produced a usable translation. */
+    const translated: number[] = [];
     /** Last failure of this batch, kept so a batch that translated nothing can explain itself. */
     let lastError: unknown;
     /** Replies that arrived and parsed, to tell a broken endpoint from a broken reply. */
     let replies = 0;
+    // Terms that this batch actually mentions. Injected per batch rather than
+    // globally: a 300-entry glossary would otherwise ride along on every request.
+    const terms = glossaryBlock(glossary, batch.map((unit) => unit.source).join("\n"));
+    const system = terms ? `${baseSystem}\n\n${terms}` : baseSystem;
 
     while (outstanding.length && attempt < maxRetries && !signal?.aborted) {
       attempt++;
@@ -284,7 +337,9 @@ export async function translateUnits(
             translated: text,
             failed: false,
           });
+          translated.push(index);
           cache.set(unit.source, text);
+          resume?.set(key(unit), text);
           done++;
         }
         outstanding = stillMissing;
@@ -310,6 +365,32 @@ export async function translateUnits(
       onBatchFailure?.(describeBatchFailure(lastError, replies));
     }
 
+    // Second pass over the batch's own successes. A reply can carry every
+    // segment and every placeholder yet still be truncated or still in English,
+    // and that is the defect readers actually hit. One corrective request names
+    // the problem; a reply that is no better than the first is discarded, and a
+    // reply that is merely shorter than ideal is kept.
+    if (qualityAudit && translated.length && !signal?.aborted) {
+      await repairSuspectSegments({
+        batch,
+        usable: translated,
+        results,
+        key,
+        profile,
+        system,
+        timeoutMs,
+        signal,
+        targetLang,
+        onTokens: (count) => {
+          tokens += count;
+        },
+        onRepaired: (unit, text) => {
+          cache.set(unit.source, text);
+          resume?.set(key(unit), text);
+        },
+      });
+    }
+
     // Anything still unresolved keeps its source text and is flagged, so the
     // reader sees which paragraphs were not translated instead of a silent gap.
     for (const index of outstanding) {
@@ -322,9 +403,15 @@ export async function translateUnits(
       });
       done++;
     }
+    // Persist after every batch: a crash then costs one batch of work, not the
+    // whole document.
+    await resume?.flush();
     report(`translated ${done}/${units.length}`);
   });
 
+  // A cancel can arrive between two batches, after the last flush; one final
+  // write keeps every completed paragraph on disk.
+  await resume?.flush();
   await cache.save();
 
   return units.map(
@@ -336,6 +423,112 @@ export async function translateUnits(
         failed: true,
       },
   );
+}
+
+interface RepairArgs {
+  /** Segments of the batch, indexed as they were sent. */
+  batch: TranslationUnit[];
+  /** Indices of `batch` that already have a translation. */
+  usable: number[];
+  results: Map<string, TranslationResult>;
+  key: (unit: TranslationUnit) => string;
+  profile: ProviderProfile;
+  /** The batch's system prompt, glossary included. */
+  system: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  targetLang: string;
+  /** Called with the token usage of the repair request. */
+  onTokens: (count: number) => void;
+  /** Called when a repaired reply replaces the stored one. */
+  onRepaired: (unit: TranslationUnit, translated: string) => void;
+}
+
+/**
+ * Re-request the segments of one batch whose reply looks damaged.
+ *
+ * Only the flagged segments are sent, numbered from zero, so the repair costs a
+ * fraction of the batch. The replacement is accepted only when it is strictly
+ * better by the audit's own count: a second reply that loses a placeholder or
+ * scores worse is discarded, because the first reply is at least complete.
+ *
+ * @param args - batch, existing results and transport options.
+ */
+async function repairSuspectSegments(args: RepairArgs): Promise<void> {
+  const { batch, usable, results, key, profile, system, timeoutMs, signal, targetLang } = args;
+  const flagged: Array<{ index: number; issues: QualityIssue[] }> = [];
+  for (const index of usable) {
+    const unit = batch[index];
+    const current = results.get(key(unit));
+    if (!current || current.failed) {
+      continue;
+    }
+    const issues = auditTranslation(unit.source, current.translated, targetLang);
+    if (issues.length) {
+      flagged.push({ index, issues });
+    }
+  }
+  if (!flagged.length) {
+    return;
+  }
+
+  const hints = correctionHints(flagged.flatMap((entry) => entry.issues));
+  const instruction = [
+    "Correction pass. Some segments in the previous reply were damaged.",
+    "Translate the segments below again, completely, into the target language.",
+    "Problems reported:",
+    ...hints.map((hint) => `- ${hint}`),
+  ].join("\n");
+
+  try {
+    const reply = await complete({
+      profile,
+      messages: [
+        { role: "system", content: `${system}\n\n${instruction}` },
+        {
+          role: "user",
+          content: userPrompt(
+            flagged.map((entry, position) => ({ i: position, t: batch[entry.index].source })),
+          ),
+        },
+      ],
+      jsonMode: true,
+      timeoutMs,
+      signal,
+    });
+    if (reply.usage?.totalTokens) {
+      args.onTokens(reply.usage.totalTokens);
+    }
+    const parsed = parseSegments(reply.content);
+    for (const [position, entry] of flagged.entries()) {
+      const unit = batch[entry.index];
+      const text = parsed.get(position);
+      if (text === undefined || !placeholdersIntact(unit.source, text)) {
+        continue;
+      }
+      const remaining = auditTranslation(unit.source, text, targetLang);
+      if (remaining.length >= entry.issues.length) {
+        // No better than what is already stored: keep the first reply and only
+        // record that it is still suspect.
+        const current = results.get(key(unit));
+        if (current) {
+          current.quality = "suspect";
+        }
+        continue;
+      }
+      results.set(key(unit), {
+        pageIndex: unit.pageIndex,
+        paragraphIndex: unit.paragraphIndex,
+        translated: text,
+        failed: false,
+        quality: remaining.length ? "suspect" : "retried",
+      });
+      args.onRepaired(unit, text);
+    }
+  } catch (error) {
+    // A repair pass is an improvement, never a requirement: keep the batch.
+    ztoolkit.log("quality repair pass failed", error);
+  }
 }
 
 /** Sleep, honouring an abort signal would be nicer but is not needed here. */

@@ -21,13 +21,21 @@ pref("systemPromptExtra", "");
 pref("sourceLang", "auto");
 pref("targetLang", "zh-CN");
 
-// --- Extraction ------------------------------------------------------------
-pref("skipReferences", false);
+// --- Pages -----------------------------------------------------------------
+// 0 means "no bound": firstPage 0 starts at the first page, lastPage 0 runs to
+// the end.
 pref("firstPage", 0);
 pref("lastPage", 0);
 
+// --- Terminology and quality -----------------------------------------------
+// `source,target` lines, one entry per line; see translate/glossary.ts.
+pref("glossary", "");
+// Re-request a paragraph whose reply looks truncated or was never translated.
+pref("qualityAudit", true);
+// Offer to continue an interrupted run of the same document.
+pref("resumePartial", true);
+
 // --- Bilingual PDF layout --------------------------------------------------
-pref("bilingualLayout", "left-right");
 pref("originalOnLeft", true);
 pref("columnGapPt", 12);
 pref("drawDivider", true);
@@ -43,8 +51,8 @@ pref("openAfterExport", false);
 pref("revealAfterExport", false);
 
 // --- Fonts -----------------------------------------------------------------
+// Empty means the bundled Noto Sans SC subset; any TTF/OTF path overrides it.
 pref("cjkFontPath", "");
-pref("fallbackFontPath", "");
 
 // --- Misc ------------------------------------------------------------------
 // Off by default: every run asks the service again, so a reply that echoed the

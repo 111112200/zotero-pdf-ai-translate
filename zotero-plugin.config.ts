@@ -7,8 +7,10 @@ export default defineConfig({
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
-  // No update server is published, so the manifest carries no update_url: an
-  // unreachable one only makes Zotero retry a check that can never succeed.
+  // The scaffold writes `update_url` into the manifest, pointing at the rolling
+  // `release` tag. That release carries update.json/update-beta.json, whose hash
+  // is verified against the XPI on every publish, so Zotero's own "check for
+  // updates" works without any additional server.
 
   build: {
     assets: ["addon/**/*.*"],

@@ -39,6 +39,7 @@ export async function onPrefsEvent(
     case "load":
       populateProviders(win);
       await syncOutputSelection(win, true);
+      bindTextareas(win);
       break;
     case "outputChanged":
       await syncOutputSelection(win);
@@ -52,8 +53,48 @@ export async function onPrefsEvent(
     case "pickDir":
       await pickOutputDirectory(win);
       break;
+    case "pickFont":
+      await pickFont(win);
+      break;
     default:
       break;
+  }
+}
+
+/**
+ * Bind the pane's multi-line settings to their preferences.
+ *
+ * Zotero's `preference=` attribute only mirrors an element's `value`, which is
+ * why the textareas are wired by hand and carry `data-pref` instead. Saves are
+ * debounced while typing and forced on blur, so a pasted glossary is stored
+ * immediately but a long prompt does not write to the preference branch on
+ * every keystroke.
+ *
+ * @param win - the preferences window.
+ */
+function bindTextareas(win: PrefsWindow): void {
+  const areas = win.document.querySelectorAll<HTMLTextAreaElement>("textarea[data-pref]");
+  for (const area of areas) {
+    const pref = area.dataset.pref;
+    if (!pref) {
+      continue;
+    }
+    area.value = getPref<string>(pref) ?? "";
+    let pending: number | undefined;
+    const save = () => setPref(pref, area.value);
+    area.addEventListener("input", () => {
+      if (pending) {
+        win.clearTimeout(pending);
+      }
+      pending = win.setTimeout(save, 400);
+    });
+    area.addEventListener("change", () => {
+      if (pending) {
+        win.clearTimeout(pending);
+        pending = undefined;
+      }
+      save();
+    });
   }
 }
 
@@ -159,23 +200,35 @@ async function runConnectionTest(win: PrefsWindow): Promise<void> {
   }
 }
 
+/**
+ * Let the user pick the font used for translated text.
+ *
+ * The bundled font covers GB2312 only, so anyone translating into Traditional
+ * Chinese, Japanese or Korean has to supply a font; making them type an absolute
+ * path into a text box is the difference between a working setting and a
+ * setting nobody finds.
+ *
+ * @param win - the preferences window.
+ */
+async function pickFont(win: PrefsWindow): Promise<void> {
+  const picker = newFilePicker();
+  picker.init(win, "Choose the font used for translated text", "open");
+  picker.appendFilter("Font files", "*.ttf; *.otf; *.ttc");
+  try {
+    await picker.show();
+  } catch {
+    // The user dismissed the dialog; nothing to do.
+    return;
+  }
+  const path = picker.file.path;
+  setPref("cjkFontPath", path);
+  setField(win, "font", path);
+  invalidateFontCache();
+}
+
 /** Let the user choose the output folder. */
 async function pickOutputDirectory(win: PrefsWindow): Promise<void> {
-  const filePicker = (
-    ChromeUtils as unknown as {
-      importESModule: (uri: string) => {
-        FilePicker: new () => {
-          init: (win: Window, title: string, mode: string) => void;
-          appendFilter: (label: string, filter: string) => void;
-          modeGetFolder: number;
-          show: () => Promise<unknown>;
-          file: { path: string };
-        };
-      };
-    }
-  ).importESModule("chrome://zotero/content/modules/filePicker.mjs").FilePicker;
-
-  const picker = new filePicker();
+  const picker = newFilePicker();
   picker.init(win, "Choose where translated PDFs are saved", "selectFolder");
   picker.appendFilter("Folders", "*");
   picker.modeGetFolder = 2;
@@ -192,6 +245,25 @@ async function pickOutputDirectory(win: PrefsWindow): Promise<void> {
   if (input) {
     input.value = picker.file.path;
   }
+}
+
+/** The file picker Zotero exposes to its own preferences panes. */
+interface ZoteroFilePicker {
+  init: (win: Window, title: string, mode: string) => void;
+  appendFilter: (label: string, filter: string) => void;
+  modeGetFolder: number;
+  show: () => Promise<unknown>;
+  file: { path: string };
+}
+
+/** Create Zotero's file picker without depending on its module path at load time. */
+function newFilePicker(): ZoteroFilePicker {
+  const { FilePicker } = (
+    ChromeUtils as unknown as {
+      importESModule: (uri: string) => { FilePicker: new () => ZoteroFilePicker };
+    }
+  ).importESModule("chrome://zotero/content/modules/filePicker.mjs");
+  return new FilePicker();
 }
 
 /** Localize menuitem labels before refreshing the menulist selected label. */

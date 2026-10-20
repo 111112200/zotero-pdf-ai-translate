@@ -104,10 +104,97 @@
       style="min-width: 10em;"
     ></html:input>
   </hbox>
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-firstpage"
+      data-l10n-id="pdfaitranslate-pref-pagerange"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="0"
+      id="zotero-prefpane-__addonRef__-firstpage"
+      preference="firstPage"
+      style="width: 5em;"
+    ></html:input>
+    <html:span style="margin: 0 6px;">–</html:span>
+    <html:input
+      type="number"
+      min="0"
+      id="zotero-prefpane-__addonRef__-lastpage"
+      preference="lastPage"
+      style="width: 5em;"
+    ></html:input>
+    <html:span
+      data-l10n-id="pdfaitranslate-pref-pagerange-hint"
+      style="margin-inline-start: 8px; opacity: 0.75;"
+    ></html:span>
+  </hbox>
+  <hbox align="start">
+    <html:label
+      for="zotero-prefpane-__addonRef__-prompt"
+      data-l10n-id="pdfaitranslate-pref-prompt"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:textarea
+      id="zotero-prefpane-__addonRef__-prompt"
+      data-pref="systemPromptExtra"
+      rows="3"
+      style="width: 32em;"
+    ></html:textarea>
+  </hbox>
+  <html:p
+    data-l10n-id="pdfaitranslate-pref-prompt-hint"
+    style="margin: 2px 0 8px 11em; opacity: 0.7;"
+  ></html:p>
+</groupbox>
+
+<groupbox>
+  <label><html:h2 data-l10n-id="pdfaitranslate-pref-glossary"></html:h2></label>
+  <html:p
+    data-l10n-id="pdfaitranslate-pref-glossary-hint"
+    style="margin: 0 0 6px 0; opacity: 0.75; max-width: 42em;"
+  ></html:p>
+  <html:textarea
+    id="zotero-prefpane-__addonRef__-glossary"
+    data-pref="glossary"
+    rows="5"
+    style="width: 34em; font-family: monospace;"
+  ></html:textarea>
 </groupbox>
 
 <groupbox>
   <label><html:h2 data-l10n-id="pdfaitranslate-pref-layout"></html:h2></label>
+  <hbox align="center">
+    <checkbox
+      id="zotero-prefpane-__addonRef__-originalleft"
+      native="true"
+      preference="originalOnLeft"
+      data-l10n-id="pdfaitranslate-pref-originalside"
+    ></checkbox>
+  </hbox>
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-columngap"
+      data-l10n-id="pdfaitranslate-pref-columngap"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="0"
+      max="96"
+      id="zotero-prefpane-__addonRef__-columngap"
+      preference="columnGapPt"
+      style="width: 6em;"
+    ></html:input>
+    <checkbox
+      id="zotero-prefpane-__addonRef__-divider"
+      native="true"
+      preference="drawDivider"
+      data-l10n-id="pdfaitranslate-pref-divider"
+      style="margin-inline-start: 16px;"
+    ></checkbox>
+  </hbox>
   <html:p data-l10n-id="pdfaitranslate-pref-layout-auto" style="max-width:40em;"></html:p>
 </groupbox>
 
@@ -162,15 +249,40 @@
       oncommand="Zotero.__addonInstance__.hooks.onPrefsEvent('pickDir', { window })"
     />
   </hbox>
-  <checkbox
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-suffix"
+      data-l10n-id="pdfaitranslate-pref-suffix"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-suffix"
+      preference="suffix"
+      style="min-width: 16em;"
+    ></html:input>
+    <checkbox
+      id="zotero-prefpane-__addonRef__-overwrite"
+      native="true"
+      preference="overwrite"
+      data-l10n-id="pdfaitranslate-pref-overwrite"
+      style="margin-inline-start: 16px;"
+    ></checkbox>
+  </hbox>
+  <checkbox native="true"
     id="zotero-prefpane-__addonRef__-attachment"
     preference="addAsAttachment"
     data-l10n-id="pdfaitranslate-pref-attachment"
   />
-  <checkbox
+  <checkbox native="true"
     id="zotero-prefpane-__addonRef__-open"
     preference="openAfterExport"
     data-l10n-id="pdfaitranslate-pref-open"
+  />
+  <checkbox native="true"
+    id="zotero-prefpane-__addonRef__-reveal"
+    preference="revealAfterExport"
+    data-l10n-id="pdfaitranslate-pref-reveal"
   />
 </groupbox>
 
@@ -190,13 +302,97 @@
       preference="concurrency"
       style="width: 6em;"
     ></html:input>
+    <html:label
+      for="zotero-prefpane-__addonRef__-batchchars"
+      data-l10n-id="pdfaitranslate-pref-batchchars"
+      style="margin-inline-start: 16px;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="200"
+      max="20000"
+      step="100"
+      id="zotero-prefpane-__addonRef__-batchchars"
+      preference="batchChars"
+      style="width: 7em; margin-inline-start: 6px;"
+    ></html:input>
   </hbox>
-  <checkbox
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-timeout"
+      data-l10n-id="pdfaitranslate-pref-timeout"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="15"
+      max="900"
+      id="zotero-prefpane-__addonRef__-timeout"
+      preference="requestTimeoutSec"
+      style="width: 6em;"
+    ></html:input>
+    <html:label
+      for="zotero-prefpane-__addonRef__-retries"
+      data-l10n-id="pdfaitranslate-pref-retries"
+      style="margin-inline-start: 16px;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="1"
+      max="10"
+      id="zotero-prefpane-__addonRef__-retries"
+      preference="maxRetries"
+      style="width: 5em; margin-inline-start: 6px;"
+    ></html:input>
+    <html:label
+      for="zotero-prefpane-__addonRef__-temperature"
+      data-l10n-id="pdfaitranslate-pref-temperature"
+      style="margin-inline-start: 16px;"
+    ></html:label>
+    <html:input
+      type="number"
+      min="0"
+      max="2"
+      step="0.1"
+      id="zotero-prefpane-__addonRef__-temperature"
+      preference="temperature"
+      style="width: 5em; margin-inline-start: 6px;"
+    ></html:input>
+  </hbox>
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-font"
+      data-l10n-id="pdfaitranslate-pref-font"
+      style="min-width: 11em;"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-font"
+      preference="cjkFontPath"
+      style="min-width: 24em;"
+    ></html:input>
+    <button
+      id="zotero-prefpane-__addonRef__-fontpick"
+      data-l10n-id="pdfaitranslate-pref-font-pick"
+      oncommand="Zotero.__addonInstance__.hooks.onPrefsEvent('pickFont', { window })"
+    />
+  </hbox>
+  <checkbox native="true"
+    id="zotero-prefpane-__addonRef__-quality"
+    preference="qualityAudit"
+    data-l10n-id="pdfaitranslate-pref-quality"
+  />
+  <checkbox native="true"
+    id="zotero-prefpane-__addonRef__-resume"
+    preference="resumePartial"
+    data-l10n-id="pdfaitranslate-pref-resume"
+  />
+  <checkbox native="true"
     id="zotero-prefpane-__addonRef__-cache"
     preference="cacheEnabled"
     data-l10n-id="pdfaitranslate-pref-cache"
   />
-  <checkbox
+  <checkbox native="true"
     id="zotero-prefpane-__addonRef__-debug"
     preference="debug"
     data-l10n-id="pdfaitranslate-pref-debug"

@@ -22,7 +22,7 @@ const PROMPT_VERSION = 3;
 const MAX_ENTRIES = 60_000;
 
 /** FNV-1a in four variants, giving a 128-bit key without a crypto dependency. */
-function hash128(input: string): string {
+export function hash128(input: string): string {
   const seeds = [0x811c9dc5, 0x01000193, 0x7fffffff, 0x9e3779b9];
   const parts: string[] = [];
   for (const seed of seeds) {
